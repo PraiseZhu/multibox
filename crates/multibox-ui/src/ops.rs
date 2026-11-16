@@ -382,7 +382,11 @@ mod tests {
         let trash = temp.path().join(".multibox-trash-old-1");
         fs::create_dir_all(trash.join("deep")).unwrap();
         fs::write(trash.join("deep/file"), "x").unwrap();
-        assert_eq!(model::load(&main).unwrap().trash, vec![trash.clone()]);
+        // By name: git reports the directory with links resolved, and the
+        // temporary directory is behind one on macOS (/var → /private/var).
+        let found = model::load(&main).unwrap().trash;
+        let names: Vec<_> = found.iter().filter_map(|path| path.file_name()).collect();
+        assert_eq!(names, [".multibox-trash-old-1"]);
         purge_all_trash(&main).unwrap();
         assert!(!trash.exists());
         assert!(model::load(&main).unwrap().trash.is_empty());
