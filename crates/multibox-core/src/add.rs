@@ -3,6 +3,7 @@ use crate::config::{CONFIG_FILE, Config};
 use crate::git::{self, Repo};
 use crate::index::{Index, Stat};
 use crate::plan::{Plan, PlanSummary, build_plan};
+use crate::record::{self, Record};
 use crate::rules::Rules;
 use crate::{Error, Result};
 use multibox_clone::{
@@ -12,7 +13,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How files reach the new worktree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -525,6 +526,7 @@ fn add_natively(
 /// Creates a worktree, as `git worktree add` would, carrying over everything
 /// the plan selected. `cwd` is where a relative `path` is resolved.
 pub fn add(cwd: &Path, options: &AddOptions, observer: &dyn Observer) -> Result<AddOutcome> {
+    let started = Instant::now();
     let source = options
         .from
         .as_ref()
@@ -618,6 +620,8 @@ pub fn add(cwd: &Path, options: &AddOptions, observer: &dyn Observer) -> Result<
     if !capability.reflink {
         check_free_space(&plan, &target, &capability)?;
     }
+    // Read again once the worktree is made: the difference is what it took.
+    let free_before = free_space(&target).ok();
 
     // With no reusable index, git performs the checkout and only caches are cloned.
     let mut git_args: Vec<&str> = vec!["worktree", "add"];
@@ -677,11 +681,35 @@ pub fn add(cwd: &Path, options: &AddOptions, observer: &dyn Observer) -> Result<
             if hook_needed {
                 run_post_checkout(&new, observer);
             }
+            let capability = report.capability.clone().unwrap_or(capability);
+            let record = Record {
+                created: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |since| since.as_secs()),
+                seconds: started.elapsed().as_secs_f64(),
+                files: plan.summary.tracked_files + plan.summary.cached_files,
+                bytes: plan.summary.tracked_bytes + plan.summary.cached_bytes,
+                cached_bytes: plan.summary.cached_bytes,
+                shared_bytes: report.hard_linked_bytes,
+                reflink: capability.reflink,
+                disk_used: free_before.and_then(|before| {
+                    free_space(&new.worktree)
+                        .ok()
+                        .map(|after| before.saturating_sub(after))
+                }),
+                crates: record::carried_crates(&plan),
+                assets: record::carried_assets(&plan, &new),
+            };
+            if let Err(err) = record.write(&new.git_dir) {
+                warnings.push(format!(
+                    "cannot note what this worktree was given, so the window will not show what it saved: {err}"
+                ));
+            }
             Ok(AddOutcome {
                 environment: adapter::environment(&new.worktree, &plan.projects),
                 path: new.worktree,
                 summary: plan.summary,
-                capability: report.capability.clone().unwrap_or(capability),
+                capability,
                 reused_index: plan.index.is_some(),
                 report: Some(report),
                 warnings,

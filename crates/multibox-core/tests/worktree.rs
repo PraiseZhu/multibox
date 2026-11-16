@@ -1,8 +1,8 @@
 //! End-to-end tests against real git repositories in temporary directories.
 
 use multibox_core::{
-    AddOptions, FinishOptions, FinishOutcome, Mode, Observer, RemoveOptions, add, finish, git,
-    purge_trash, remove,
+    AddOptions, FinishOptions, FinishOutcome, Mode, Observer, Record, RemoveOptions, add, finish,
+    git, purge_trash, remove,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1558,4 +1558,44 @@ fn finish_takes_merge_options_and_branch_keeping_from_the_config() {
         .trim(),
         "task"
     );
+}
+
+#[test]
+fn a_new_worktree_records_what_it_was_given() {
+    let (_temp, repo) = unity_repo();
+    write(&repo, "client/Assets/a.txt.meta", "guid: 1\n");
+    write(&repo, "client/Assets/deep.meta", "guid: 2\n");
+    write(&repo, "notes.meta", "outside the Unity project\n");
+    sh(&repo, &["add", "."]);
+    sh(&repo, &["commit", "-q", "-m", "metas"]);
+    add(&repo, &options("../wt", &["-b", "feature"]), &Silent).unwrap();
+    let wt = repo.parent().unwrap().join("wt");
+    let new = git::Repo::discover(&wt).unwrap();
+
+    let record = Record::read(&new.git_dir).expect("the worktree's record");
+    // Each asset of the project whose import results came along.
+    assert_eq!(record.assets, 2);
+    assert_eq!(record.crates, 0);
+    assert!(record.files > 0 && record.bytes >= record.cached_bytes);
+    assert!(record.cached_bytes > 0);
+    assert!(record.created > 0);
+
+    // The record lives in the worktree's git directory, and goes with it.
+    let outcome = remove(&repo, &removal("../wt", 0)).unwrap();
+    if let Some(trash) = outcome.trash {
+        purge_trash(&trash).unwrap();
+    }
+    assert!(!Record::path(&new.git_dir).exists());
+}
+
+#[test]
+fn the_record_counts_the_dependencies_that_arrive_compiled() {
+    let (_temp, repo) = cargo_repo();
+    write(&repo, ".worktreeinclude", "target/\n");
+    add(&repo, &copy_mode("../wt"), &Silent).unwrap();
+    let new = git::Repo::discover(&repo.parent().unwrap().join("wt")).unwrap();
+    let record = Record::read(&new.git_dir).unwrap();
+    // serde came along compiled; the workspace's own app is rebuilt.
+    assert_eq!(record.crates, 1);
+    assert_eq!(record.assets, 0);
 }

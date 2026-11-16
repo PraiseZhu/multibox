@@ -14,6 +14,7 @@ pub mod git;
 pub mod index;
 mod migrate;
 mod plan;
+pub mod record;
 mod remove;
 mod rules;
 mod setup;
@@ -27,6 +28,7 @@ pub use migrate::{
 };
 pub use multibox_clone::{Capability, Progress, Report, Strategy, Volume};
 pub use plan::{Plan, PlanSummary, build_plan};
+pub use record::Record;
 pub use remove::{RemoveOptions, RemoveOutcome, purge_trash, remove, spawn_detached, sweep_trash};
 pub use rules::Rules;
 pub use setup::{Mount, SetupOptions, SetupPlan, plan_setup, render_script, run_setup};
