@@ -339,27 +339,9 @@ fn copy_registrations(from: &Path, to: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn make_directory_link(link: &Path, target: &Path) -> Result<()> {
-    // Junctions need no privileges, unlike directory symlinks. cmd reads a
-    // forward slash as a switch, and git reports paths with forward slashes.
-    let native = |path: &Path| {
-        let text = path.to_string_lossy();
-        text.strip_prefix(r"\\?\")
-            .unwrap_or(&text)
-            .replace('/', "\\")
-    };
-    let out = std::process::Command::new("cmd")
-        .args(["/c", "mklink", "/J"])
-        .arg(native(link))
-        .arg(native(target))
-        .output()?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(Error::new(format!(
-            "cannot create junction: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )))
-    }
+    // Junctions need no privileges, unlike directory symlinks.
+    multibox_clone::make_junction(link, target)
+        .map_err(|err| Error::new(format!("cannot create junction: {err}")))
 }
 
 #[cfg(unix)]

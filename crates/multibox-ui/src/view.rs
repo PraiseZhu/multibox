@@ -922,7 +922,14 @@ fn open_terminal(path: &Path) {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-        let opened = Command::new("wt.exe").arg("-d").arg(path).spawn().is_ok();
+        // Windows Terminal splits its command line at every `;`, quoted or
+        // not, and runs what follows as another command. So the path is never
+        // put on it: the terminal starts in its own working directory.
+        let opened = Command::new("wt.exe")
+            .args(["-d", "."])
+            .current_dir(path)
+            .spawn()
+            .is_ok();
         if !opened {
             let _ = Command::new("cmd.exe")
                 .current_dir(path)

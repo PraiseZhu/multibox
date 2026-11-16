@@ -22,11 +22,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_INTEGRITY_STREAM, FILE_ATTRIBUTE_NORMAL,
     FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SPARSE_FILE,
     FILE_ATTRIBUTE_SYSTEM, FILE_BASIC_INFO, FILE_END_OF_FILE_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_SEQUENTIAL_SCAN, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_WRITE_ATTRIBUTES, FileBasicInfo, FileEndOfFileInfo,
-    FileStandardInfo, GetDiskFreeSpaceExW, GetDiskFreeSpaceW, GetDriveTypeW,
-    GetFileInformationByHandleEx, GetLogicalDrives, GetVolumeInformationW, GetVolumePathNameW,
-    OPEN_EXISTING, SetFileInformationByHandle,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+    FILE_WRITE_ATTRIBUTES, FileBasicInfo, FileEndOfFileInfo, FileStandardInfo, GetDiskFreeSpaceExW,
+    GetDiskFreeSpaceW, GetDriveTypeW, GetFileInformationByHandleEx, GetLogicalDrives,
+    GetVolumeInformationW, GetVolumePathNameW, OPEN_EXISTING, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
@@ -517,26 +517,85 @@ pub fn create_link(src: &Path, dst: &Path, target: &Path) -> io::Result<()> {
     }
 }
 
-fn make_junction(link: &Path, target: &Path) -> io::Result<()> {
-    let native = |path: &Path| {
-        let text = path.to_string_lossy();
-        text.strip_prefix(r"\\?\")
-            .unwrap_or(&text)
-            .replace('/', "\\")
+/// Makes `link`, which must not exist yet, a junction to the directory
+/// `target`. Junctions need no privilege, unlike directory symlinks.
+///
+/// The reparse point is written directly rather than with `cmd /c mklink /J`.
+/// cmd reads `&`, `|`, `^` and `%` in its arguments as its own syntax, so a
+/// folder named `R&D` would have broken the link or, worse, run whatever
+/// followed the `&` as a command.
+pub fn make_junction(link: &Path, target: &Path) -> io::Result<()> {
+    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    // A junction names an absolute path. A relative target is read from the
+    // link's own directory, as a symlink's would be.
+    let target = match link.parent() {
+        Some(parent) if target.is_relative() => parent.join(target),
+        _ => target.to_path_buf(),
     };
-    let output = no_console_window(
-        Command::new("cmd")
-            .args(["/c", "mklink", "/J"])
-            .arg(native(link))
-            .arg(native(target)),
-    )
-    .output()?;
-    if output.status.success() {
-        Ok(())
+    let target = std::path::absolute(&target)?;
+    let text = target.to_string_lossy();
+    let plain = text
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&text)
+        .replace('/', "\\");
+    let print: Vec<u16> = plain.encode_utf16().collect();
+    let substitute: Vec<u16> = format!(r"\??\{plain}").encode_utf16().collect();
+    // A mount point's REPARSE_DATA_BUFFER: the tag and the length of what
+    // follows the 8-byte header, then the offset and length in bytes of the
+    // substitute and the print name, then both names, each ending in a NUL.
+    let names = (substitute.len() + 1 + print.len() + 1) * 2;
+    let length = u16::try_from(8 + names)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "junction target too long"))?;
+    let mut buffer = Vec::with_capacity(16 + names);
+    buffer.extend(IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    buffer.extend(length.to_le_bytes());
+    buffer.extend(0u16.to_le_bytes());
+    for field in [
+        0,
+        substitute.len() * 2,
+        (substitute.len() + 1) * 2,
+        print.len() * 2,
+    ] {
+        buffer.extend((field as u16).to_le_bytes());
+    }
+    for unit in substitute.iter().chain(&[0]).chain(&print).chain(&[0]) {
+        buffer.extend(unit.to_le_bytes());
+    }
+
+    fs::create_dir(link)?;
+    let made = open_for_reparse(link).and_then(|dir| {
+        ioctl(
+            &dir,
+            FSCTL_SET_REPARSE_POINT,
+            buffer.as_ptr().cast(),
+            buffer.len(),
+        )
+    });
+    if made.is_err() {
+        let _ = fs::remove_dir(link);
+    }
+    made
+}
+
+/// The directory itself, not what a reparse point in it leads to.
+fn open_for_reparse(path: &Path) -> io::Result<Handle> {
+    let path = wide(path);
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        Err(io::Error::last_os_error())
     } else {
-        Err(io::Error::other(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ))
+        Ok(Handle(handle))
     }
 }
 
@@ -550,4 +609,52 @@ pub fn set_dir_times(path: &Path, times: &Times) -> io::Result<()> {
         update = update.set_created(created);
     }
     dir.set_times(update)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn junctions_take_names_that_cmd_would_misread() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("R&D %PATH% ^x");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("inside.txt"), "seen").unwrap();
+
+        let link = temp.path().join("link&echo hi %OS%");
+        make_junction(&link, &target).unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(link.join("inside.txt")).unwrap(), "seen");
+        assert_eq!(
+            fs::canonicalize(&link).unwrap(),
+            fs::canonicalize(&target).unwrap()
+        );
+
+        // Relative, from the link's own directory, as a symlink is read.
+        let relative = temp.path().join("relative");
+        make_junction(&relative, Path::new("R&D %PATH% ^x")).unwrap();
+        assert_eq!(
+            fs::read_to_string(relative.join("inside.txt")).unwrap(),
+            "seen"
+        );
+
+        // Removing a junction leaves what it led to.
+        fs::remove_dir(&link).unwrap();
+        assert!(target.join("inside.txt").exists());
+    }
+
+    #[test]
+    fn a_junction_never_replaces_an_existing_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let link = temp.path().join("link");
+        fs::create_dir(&link).unwrap();
+        assert!(make_junction(&link, temp.path()).is_err());
+        assert!(link.is_dir());
+    }
 }
