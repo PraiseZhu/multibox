@@ -21,9 +21,10 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, AnyView, App, ClickEvent, Context, Div, ElementId, FontWeight, Hsla,
+    AnyElement, AnyView, App, BoxShadow, ClickEvent, Context, Div, ElementId, FontWeight, Hsla,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, relative,
+    StatefulInteractiveElement, Styled, Window, div, hsla, point, prelude::FluentBuilder, px,
+    relative,
 };
 use std::sync::atomic::Ordering;
 
@@ -88,14 +89,28 @@ fn caption(label: impl Into<SharedString>, palette: &Palette) -> Div {
         .child(label.into())
 }
 
-/// A card: white on the grey ground, graphite on the dark one.
+/// A card. On white it is a hairline with the faintest shadow under it; on
+/// graphite, a step lighter than the ground, where a shadow would not show.
 fn card(palette: &Palette) -> Div {
     v_flex()
         .bg(palette.card)
         .border_1()
         .border_color(palette.hairline)
         .rounded(px(10.))
+        .when(!palette.dark, |card| {
+            card.shadow(vec![BoxShadow {
+                color: hsla(0., 0., 0., 0.04),
+                offset: point(px(0.), px(1.)),
+                blur_radius: px(3.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
+        })
 }
+
+/// The narrowest window that has the overview's four tiles in one row: four
+/// of about 190 px with their gaps, the content's padding and the inspector.
+const OVERVIEW_IN_ONE_ROW: f32 = 1230.;
 
 /// The overview's figures, and the bars under them.
 const FIGURE: f32 = 26.;
@@ -150,6 +165,41 @@ fn tile(
         )
 }
 
+/// A small (i) that explains the tile it sits in.
+fn info(id: &'static str, text: impl Into<SharedString>, palette: &Palette) -> AnyElement {
+    div()
+        .id(id)
+        .child(glyph(IconName::Info, 13., palette.ink3))
+        .tooltip(tip(text))
+        .into_any_element()
+}
+
+/// Seconds of work a carried cache spares, from docs/benchmarks.md. A Unity 6
+/// game imported 56,961 assets in 806 to 1,044 s on a 32-thread workstation,
+/// about 16 ms each; a Rust workspace built in 81 s less with 559 dependencies
+/// carried, about 0.15 s each. Other machines and projects differ by several
+/// times, which is why the window calls the result an estimate.
+const SECONDS_PER_ASSET: f64 = 0.016;
+const SECONDS_PER_CRATE: f64 = 0.15;
+
+/// What Multibox saved across the linked worktrees.
+#[derive(Default)]
+struct Saving {
+    bytes: u64,
+    crates: u64,
+    assets: u64,
+    /// Linked worktrees, and how many of them have a record.
+    linked: usize,
+    recorded: usize,
+    unrecorded: usize,
+}
+
+impl Saving {
+    fn seconds(&self) -> f64 {
+        self.assets as f64 * SECONDS_PER_ASSET + self.crates as f64 * SECONDS_PER_CRATE
+    }
+}
+
 /// One kind of space in a bar.
 struct Part {
     label: &'static str,
@@ -170,15 +220,15 @@ fn parts(split: &Split, palette: &Palette) -> [Part; 4] {
             bytes: split.tracked,
         },
         Part {
-            label: "缓存",
-            long: "缓存和未跟踪的文件",
+            label: "独有缓存",
+            long: "独有的缓存和未跟踪文件",
             color: palette.cache,
             ghost: false,
             bytes: split.untracked,
         },
         Part {
-            label: "共享",
-            long: "与其他工作区共享",
+            label: "共用缓存",
+            long: "和其他工作区共用，只存一份",
             color: palette.shared,
             ghost: true,
             bytes: split.linked,
@@ -436,6 +486,11 @@ impl MultiboxApp {
             .border_b_1()
             .border_color(palette.hairline)
             .child(title)
+            .children(
+                self.snapshot
+                    .as_ref()
+                    .and_then(|snapshot| self.disk_chip(snapshot, palette)),
+            )
             .child(
                 h_flex()
                     .flex_none()
@@ -511,9 +566,40 @@ impl MultiboxApp {
         (whole, on_disk)
     }
 
+    /// What Multibox has saved across the linked worktrees.
+    fn saving(&self, snapshot: &Snapshot) -> Saving {
+        // On NTFS, what the hard links share now; a cloning volume says
+        // nothing of the kind, so there the records kept at creation count.
+        let mut saving = Saving {
+            bytes: self.dedup.1,
+            ..Saving::default()
+        };
+        for worktree in snapshot.worktrees.iter().filter(|w| !w.is_main && w.exists) {
+            saving.linked += 1;
+            let Some(details) = self.details.get(&worktree.path) else {
+                continue;
+            };
+            match &details.record {
+                Some(record) => {
+                    saving.recorded += 1;
+                    saving.crates += record.crates;
+                    saving.assets += record.assets;
+                    if record.reflink {
+                        saving.bytes += record.saved_bytes();
+                    }
+                }
+                None => saving.unrecorded += 1,
+            }
+        }
+        saving
+    }
+
+    /// Four tiles in a row where they fit, else two rows of two: wrapping
+    /// freely would leave one tile alone and stretched on a line of its own.
     fn overview(
         &self,
         snapshot: &Snapshot,
+        wide: bool,
         palette: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -521,14 +607,23 @@ impl MultiboxApp {
             .details
             .get(&snapshot.main)
             .is_some_and(|details| details.reflink);
-        h_flex()
-            .items_stretch()
-            .flex_wrap()
-            .gap(px(16.))
-            .child(self.occupied(snapshot, reflink, palette))
-            .child(self.disk(snapshot, reflink, palette))
-            .child(self.reclaim(palette, cx))
-            .into_any_element()
+        let saving = self.saving(snapshot);
+        let [a, b, c, d] = [
+            self.occupied(snapshot, reflink, palette),
+            self.saved_space(&saving, palette),
+            self.saved_work(&saving, palette),
+            self.reclaim(palette, cx),
+        ];
+        let row = || h_flex().items_stretch().gap(px(16.));
+        if wide {
+            row().child(a).child(b).child(c).child(d).into_any_element()
+        } else {
+            v_flex()
+                .gap(px(16.))
+                .child(row().child(a).child(b))
+                .child(row().child(c).child(d))
+                .into_any_element()
+        }
     }
 
     fn occupied(&self, snapshot: &Snapshot, reflink: bool, palette: &Palette) -> Div {
@@ -539,7 +634,7 @@ impl MultiboxApp {
             .filter(|w| self.usage.contains_key(&w.path))
             .count();
         let (whole, on_disk) = self.totals(snapshot);
-        let (actual, saved) = self.dedup;
+        let (actual, _) = self.dedup;
 
         let sentence: AnyElement = if measured < present {
             h_flex()
@@ -550,8 +645,6 @@ impl MultiboxApp {
                     palette,
                 ))
                 .into_any_element()
-        } else if saved > 0 {
-            line(format!("共享省下 {}", format::bytes(saved)), palette).into_any_element()
         } else {
             line(format!("{present} 个工作区"), palette).into_any_element()
         };
@@ -562,19 +655,14 @@ impl MultiboxApp {
             )
         } else {
             format!(
-                "各工作区的文件合计 {}，通过硬链接共用的只算一次。",
+                "各工作区的文件合计 {}，共用的缓存只算一次。",
                 format::bytes(whole.total())
             )
         };
-        let info = div()
-            .id("usage-info")
-            .child(glyph(IconName::Info, 13., palette.ink3))
-            .tooltip(tip(explain))
-            .into_any_element();
         tile(
             IconName::Layers,
             "占用磁盘",
-            Some(info),
+            Some(info("usage-info", explain, palette)),
             figure(actual, FIGURE, UNIT, palette),
             sentence,
             Some(
@@ -585,76 +673,145 @@ impl MultiboxApp {
         )
     }
 
-    fn disk(&self, snapshot: &Snapshot, reflink: bool, palette: &Palette) -> Div {
-        let Some(volume) = snapshot.volume_of(&snapshot.main) else {
-            return tile(
-                IconName::HardDrive,
-                "磁盘",
-                None,
-                run(FIGURE, FIGURE, palette.ink3, palette).child("—"),
-                line("没找到所在的卷", palette),
-                None,
-                palette,
-            );
-        };
-        let used = volume.total.saturating_sub(volume.free);
-        let share = used as f32 / volume.total.max(1) as f32;
-        let filesystem = self
-            .details
-            .get(&snapshot.main)
-            .and_then(|details| details.filesystem.clone())
-            .unwrap_or_else(|| volume.filesystem.clone());
-        let mode = if reflink {
-            "这个卷支持 reflink：新工作区和源工作区共用没改过的数据，几乎不占空间。"
-        } else {
-            "这个卷上新工作区是完整的一份，只有写一次就不再改的缓存通过硬链接共用。放到 Dev Drive 上可以共用全部数据。"
-        };
-        let tag = h_flex()
-            .id("filesystem")
-            .flex_none()
-            .h(px(18.))
-            .px(px(6.))
-            .rounded(px(4.))
-            .bg(palette.selected)
-            .child(text(11., palette.ink2).child(filesystem))
-            .tooltip(tip(mode))
-            .into_any_element();
-        let meter = div()
-            .w_full()
-            .h(px(BAR))
-            .rounded(px(BAR / 2.))
-            .bg(palette.selected)
-            .child(
-                div()
-                    .h_full()
-                    .w(relative(share.clamp(0.01, 1.)))
-                    .rounded(px(BAR / 2.))
-                    .bg(if share > 0.9 {
-                        palette.danger
-                    } else {
-                        palette.ink3
-                    }),
-            )
-            .into_any_element();
-        tile(
-            IconName::HardDrive,
-            format!("磁盘 {}", volume.root.trim_end_matches(['\\', '/'])),
-            Some(tag),
-            h_flex()
-                .items_end()
-                .gap(px(6.))
-                .child(figure(volume.free, FIGURE, UNIT, palette))
-                .child(run(UNIT, FIGURE, palette.ink2, palette).child("可用")),
+    fn saved_space(&self, saving: &Saving, palette: &Palette) -> Div {
+        let (actual, _) = self.dedup;
+        let sentence = if saving.bytes > 0 {
             line(
                 format!(
-                    "已用 {}，共 {}",
-                    format::percent(used, volume.total),
-                    format::bytes(volume.total)
+                    "不用 Multibox 要占 {}",
+                    format::bytes(actual + saving.bytes)
                 ),
                 palette,
-            ),
-            Some(meter),
+            )
+        } else if saving.linked == 0 {
+            line("还没有用 Multibox 建的工作区", palette)
+        } else {
+            line("这些工作区没有和别的共用数据", palette)
+        };
+        let compare = [
+            Part {
+                label: "实际占用",
+                long: "现在实际占用",
+                color: palette.cache,
+                ghost: false,
+                bytes: actual,
+            },
+            Part {
+                label: "省下",
+                long: "Multibox 省下",
+                color: palette.shared,
+                ghost: true,
+                bytes: saving.bytes,
+            },
+        ];
+        tile(
+            IconName::PiggyBank,
+            "省下的空间",
+            Some(info(
+                "saved-space-info",
+                "NTFS 上，几个工作区共用的缓存（硬链接）在磁盘上只存一份，这里是此刻因此省下的。Dev Drive 和 macOS 上，新工作区和源工作区共用没改过的数据，这里是创建时少写的部分。",
+                palette,
+            )),
+            figure(saving.bytes, FIGURE, UNIT, palette),
+            sentence,
+            (saving.bytes > 0)
+                .then(|| stack("saved", &compare, BAR, TILE_SPAN, palette).into_any_element()),
             palette,
+        )
+    }
+
+    fn saved_work(&self, saving: &Saving, palette: &Palette) -> Div {
+        let seconds = saving.seconds();
+        let (number, unit, done) = if saving.assets > 0 {
+            (saving.assets, "个资源", "不用重新导入")
+        } else {
+            (saving.crates, "个依赖包", "不用重新编译")
+        };
+        let sentence = if number > 0 {
+            line(
+                format!("{done} · {}（估算）", format::estimate(seconds)),
+                palette,
+            )
+        } else if saving.recorded == 0 {
+            line("新建的工作区会记下省了什么", palette)
+        } else {
+            line("这些工作区没有带过去编译或导入的结果", palette)
+        };
+        // The second engine, if both saved work, or why some count is missing.
+        let note = if saving.assets > 0 && saving.crates > 0 {
+            Some(format!(
+                "另有 {} 个依赖包不用重新编译",
+                format::count(saving.crates)
+            ))
+        } else if saving.unrecorded > 0 {
+            Some(format!("{} 个旧工作区没有记录", saving.unrecorded))
+        } else {
+            None
+        };
+        tile(
+            IconName::Timer,
+            "省下的工作",
+            Some(info(
+                "saved-work-info",
+                "数量是精确的：创建工作区时记下带过去了多少编译好的依赖包、多少资源的导入结果；以前的版本建的工作区没有这份记录。时间是估算，按 docs/benchmarks.md 里一台 32 线程 Windows 工作站的速度：Unity 每个资源约 16 毫秒，Rust 每个依赖包约 0.15 秒。换一台机器或工程，实际可能快或慢好几倍。",
+                palette,
+            )),
+            h_flex()
+                .items_end()
+                .gap(px(UNIT * 0.3))
+                .child(
+                    run(FIGURE, FIGURE, palette.ink, palette)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format::count(number)),
+                )
+                .child(run(UNIT, FIGURE, palette.ink2, palette).child(unit)),
+            sentence,
+            note.map(|note| line(note, palette).into_any_element()),
+            palette,
+        )
+    }
+
+    /// The volume the repository is on, small, in the top bar.
+    fn disk_chip(&self, snapshot: &Snapshot, palette: &Palette) -> Option<AnyElement> {
+        let volume = snapshot.volume_of(&snapshot.main)?;
+        let details = self.details.get(&snapshot.main);
+        let reflink = details.is_some_and(|details| details.reflink);
+        let filesystem = details
+            .and_then(|details| details.filesystem.clone())
+            .unwrap_or_else(|| volume.filesystem.clone());
+        let used = volume.total.saturating_sub(volume.free);
+        let full = used as f64 > volume.total as f64 * 0.9;
+        let mode = if reflink {
+            "支持 reflink：新工作区和源工作区共用没改过的数据，几乎不占空间。"
+        } else {
+            "新工作区是完整的一份，只有写一次就不再改的缓存通过硬链接共用。放到 Dev Drive 上可以共用全部数据。"
+        };
+        Some(
+            h_flex()
+                .id("disk")
+                .flex_none()
+                .h(px(24.))
+                .px(px(8.))
+                .gap(px(6.))
+                .rounded(px(6.))
+                .bg(palette.selected)
+                .child(glyph(
+                    IconName::HardDrive,
+                    13.,
+                    if full { palette.danger } else { palette.ink3 },
+                ))
+                .child(text(12., palette.ink2).child(format!(
+                    "{} {} · 剩 {}",
+                    volume.root.trim_end_matches(['\\', '/']),
+                    filesystem,
+                    format::bytes(volume.free)
+                )))
+                .tooltip(tip(format!(
+                    "已用 {}，共 {}。{mode}",
+                    format::percent(used, volume.total),
+                    format::bytes(volume.total)
+                )))
+                .into_any_element(),
         )
     }
 
@@ -821,7 +978,26 @@ impl MultiboxApp {
             },
         };
         let size: AnyElement = match usage {
-            Some(usage) => figure(usage.split.total(), 14., 12., palette).into_any_element(),
+            Some(usage) => {
+                let linked = usage.split.linked;
+                v_flex()
+                    .id("size")
+                    .items_end()
+                    .gap(px(3.))
+                    .child(figure(usage.split.total() - linked, 14., 12., palette))
+                    .when(linked > 0, |column| {
+                        column.child(
+                            text(11., palette.ink3)
+                                .child(format!("共用 {}", format::bytes(linked))),
+                        )
+                    })
+                    .tooltip(tip(if linked > 0 {
+                        "实际占用：删掉它能腾出这么多。共用的部分磁盘上只存一份，删掉它也不会腾出来。"
+                    } else {
+                        "实际占用：删掉它能腾出这么多。"
+                    }))
+                    .into_any_element()
+            }
             None => text(14., palette.ink3).child("—").into_any_element(),
         };
 
@@ -847,7 +1023,7 @@ impl MultiboxApp {
             }))
             .child(identity)
             .child(div().flex_none().w(relative(0.36)).child(bar))
-            .child(h_flex().flex_none().w(px(76.)).justify_end().child(size))
+            .child(h_flex().flex_none().w(px(88.)).justify_end().child(size))
             .into_any_element()
     }
 
@@ -902,6 +1078,78 @@ impl MultiboxApp {
     }
 
     // ---- inspector -----------------------------------------------------
+
+    /// What making this worktree saved, from the record Multibox kept.
+    fn worktree_saving(&self, details: Option<&Details>, split: &Split, palette: &Palette) -> Div {
+        let section = v_flex()
+            .gap(px(10.))
+            .child(caption("这个工作区省下", palette));
+        let Some(details) = details else {
+            return section;
+        };
+        let Some(record) = &details.record else {
+            return section.child(
+                text(12., palette.ink3)
+                    .child("这个工作区不是用这一版 Multibox 建的，没有记下省了什么。"),
+            );
+        };
+        // On NTFS what it shares now; on a cloning volume what it was spared
+        // writing when it was made.
+        let space = if record.reflink {
+            record.saved_bytes()
+        } else {
+            split.linked
+        };
+        let seconds =
+            record.assets as f64 * SECONDS_PER_ASSET + record.crates as f64 * SECONDS_PER_CRATE;
+        let item = |icon: IconName, words: String| {
+            h_flex()
+                .gap(px(8.))
+                .child(glyph(icon, 13., palette.ink3).flex_none())
+                .child(text(13., palette.ink2).child(words))
+        };
+        let mut list = v_flex().gap(px(8.));
+        if space > 0 {
+            list = list.child(item(
+                IconName::PiggyBank,
+                format!("{} 空间", format::bytes(space)),
+            ));
+        }
+        if record.assets > 0 {
+            list = list.child(item(
+                IconName::Image,
+                format!("{} 个资源不用重新导入", format::count(record.assets)),
+            ));
+        }
+        if record.crates > 0 {
+            list = list.child(item(
+                IconName::Package,
+                format!("{} 个依赖包不用重新编译", format::count(record.crates)),
+            ));
+        }
+        if seconds > 0. {
+            list = list.child(
+                div()
+                    .id("saved-time")
+                    .child(item(
+                        IconName::Timer,
+                        format!("省下{}（估算）", format::estimate(seconds)),
+                    ))
+                    .tooltip(tip(
+                        "按 docs/benchmarks.md 里一台 32 线程 Windows 工作站的速度估算：Unity 每个资源约 16 毫秒，Rust 每个依赖包约 0.15 秒。换一台机器或工程，实际可能快或慢好几倍。",
+                    )),
+            );
+        }
+        list = list.child(item(
+            IconName::Clock,
+            if record.seconds < 1. {
+                "创建用了不到 1 秒".to_owned()
+            } else {
+                format!("创建用了 {:.0} 秒", record.seconds)
+            },
+        ));
+        section.child(list)
+    }
 
     fn actions(
         &self,
@@ -1100,12 +1348,12 @@ impl MultiboxApp {
             let kinds = parts(&split, palette);
             let mut section = v_flex()
                 .gap(px(10.))
-                .child(caption("占用", palette))
+                .child(caption("实际占用", palette))
                 .child(
                     h_flex()
                         .items_end()
                         .justify_between()
-                        .child(figure(total, 26., 14., palette))
+                        .child(figure(total - split.linked, 26., 14., palette))
                         .child(
                             run(12., 26., palette.ink3, palette)
                                 .child(format!("{} 个文件", format::count(usage.files))),
@@ -1139,10 +1387,15 @@ impl MultiboxApp {
                             }),
                     ),
                 );
-            if !worktree.is_main {
+            if split.linked > 0 {
                 section = section.child(text(12., palette.ink3).child(format!(
-                    "删除它能腾出 {}",
-                    format::bytes(total - split.linked)
+                    "另有 {} 和其他工作区共用，磁盘上只存一份{}",
+                    format::bytes(split.linked),
+                    if worktree.is_main {
+                        ""
+                    } else {
+                        "，删掉它也不会腾出来"
+                    }
                 )));
             }
             if details.is_some_and(|details| details.reflink) {
@@ -1152,6 +1405,9 @@ impl MultiboxApp {
                 );
             }
             body = body.child(section);
+            if !worktree.is_main {
+                body = body.child(self.worktree_saving(details, &split, palette));
+            }
 
             // The same three columns as the list of worktrees: name, a bar on
             // the scale of the largest entry, size.
@@ -1395,8 +1651,10 @@ impl MultiboxApp {
 }
 
 impl Render for MultiboxApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::current(cx);
+        // Room for four tiles of about 190 px beside the inspector.
+        let wide = window.viewport_size().width >= px(OVERVIEW_IN_ONE_ROW);
         let header = self.header(&palette, cx);
 
         let content: AnyElement = match self.snapshot.clone() {
@@ -1432,7 +1690,7 @@ impl Render for MultiboxApp {
                                 v_flex()
                                     .p(px(24.))
                                     .gap(px(16.))
-                                    .child(self.overview(&snapshot, &palette, cx))
+                                    .child(self.overview(&snapshot, wide, &palette, cx))
                                     .child(
                                         card(&palette)
                                             .p(px(6.))

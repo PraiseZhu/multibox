@@ -62,6 +62,23 @@ pub fn count(value: u64) -> String {
     out
 }
 
+/// An estimated duration, rounded as far as an estimate deserves:
+/// "约 40 秒", "约 15 分钟", "约 2.5 小时".
+pub fn estimate(seconds: f64) -> String {
+    if seconds < 60. {
+        format!("约 {} 秒", seconds.round().max(1.))
+    } else if seconds < 90. * 60. {
+        format!("约 {} 分钟", (seconds / 60.).round())
+    } else {
+        let hours = (seconds / 360.).round() / 10.;
+        if hours.fract() == 0. {
+            format!("约 {hours:.0} 小时")
+        } else {
+            format!("约 {hours:.1} 小时")
+        }
+    }
+}
+
 pub fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -113,6 +130,15 @@ fn local_offset_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn estimates_round_to_what_they_can_claim() {
+        assert_eq!(estimate(0.2), "约 1 秒");
+        assert_eq!(estimate(12.4), "约 12 秒");
+        assert_eq!(estimate(15. * 60.), "约 15 分钟");
+        assert_eq!(estimate(2. * 3600.), "约 2 小时");
+        assert_eq!(estimate(2.5 * 3600.), "约 2.5 小时");
+    }
 
     fn show(bytes: u64, step: f64) -> String {
         let (number, unit) = scaled(bytes, step);

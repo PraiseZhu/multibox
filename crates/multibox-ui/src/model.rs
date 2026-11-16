@@ -140,6 +140,9 @@ pub struct Details {
     pub reflink: bool,
     pub merge_in_progress: bool,
     pub problems: Vec<String>,
+    /// What Multibox gave the worktree when it made it; none for the main
+    /// worktree, or one made by git or an older Multibox.
+    pub record: Option<multibox_core::Record>,
 }
 
 impl Details {
@@ -233,6 +236,9 @@ pub fn details(worktree: &Worktree, main: &Path, into: Option<&str>) -> Details 
             }
         }
     }
+    details.record = git::Repo::discover(path)
+        .ok()
+        .and_then(|repo| multibox_core::Record::read(&repo.git_dir));
     details
 }
 

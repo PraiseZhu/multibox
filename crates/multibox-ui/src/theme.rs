@@ -1,7 +1,7 @@
 //! The window's colours, in one place.
 //!
-//! The chrome is neutral: white cards on a warm grey ground in light mode,
-//! graphite in dark, with the buttons in ink. Colour is kept for what carries
+//! The chrome is neutral: white, with cards drawn by a hairline and the
+//! faintest shadow, in light mode; graphite in dark; the buttons in ink. Colour is kept for what carries
 //! meaning. One lapis blue, deeper and quieter than the usual interface blue,
 //! marks the caches a
 //! worktree holds, and its ghost, outlined in the same blue, marks cache data
@@ -45,21 +45,21 @@ struct Tones {
 }
 
 const LIGHT: Tones = Tones {
-    canvas: 0xF5F4F1,
+    canvas: 0xFFFFFF,
     card: 0xFFFFFF,
     panel: 0xFFFFFF,
     raised: 0xFFFFFF,
-    ink: 0x1A1918,
-    ink2: 0x53514D,
-    ink3: 0x6C6A65,
-    hairline: 0xE8E6E1,
-    edge: 0xD9D6D0,
-    hover: 0xF5F4F1,
-    selected: 0xEFEEEA,
-    source: 0x22211F,
+    ink: 0x18181A,
+    ink2: 0x515155,
+    ink3: 0x6E6E73,
+    hairline: 0xE8E8EB,
+    edge: 0xD8D8DC,
+    hover: 0xF7F7F8,
+    selected: 0xF3F3F5,
+    source: 0x1F1F22,
     cache: 0x2C5C9E,
     shared: 0xCBD8EA,
-    git: 0x9B978F,
+    git: 0x9C9CA1,
     success: 0x22855A,
     warning: 0xA9690C,
     danger: 0xC43F3B,
@@ -101,7 +101,7 @@ fn config(dark: bool) -> ThemeConfig {
     let (primary_hover, primary_active, on_danger, overlay) = if dark {
         ("#ffffff", "#d6d6d3", hex(t.canvas), "#00000080")
     } else {
-        ("#33322f", "#000000", "#ffffff".to_owned(), "#1a191833")
+        ("#323236", "#000000", "#ffffff".to_owned(), "#18181a33")
     };
     let colors: serde_json::Map<String, serde_json::Value> = [
         ("background", hex(t.canvas)),
