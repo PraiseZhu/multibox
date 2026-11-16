@@ -1,18 +1,24 @@
 //! The window's colours, in one place.
 //!
 //! The chrome is neutral: white, with cards drawn by a hairline and the
-//! faintest shadow, in light mode; graphite in dark; the buttons in ink. Colour is kept for what carries
-//! meaning. One lapis blue, deeper and quieter than the usual interface blue,
-//! marks the caches a
-//! worktree holds, and its ghost, outlined in the same blue, marks cache data
-//! shared with other worktrees, which takes no room of its own. Green, amber
-//! and red say merged, uncommitted and gone, always beside an icon and words.
+//! faintest shadow, in light mode; graphite in dark; the buttons in ink.
+//! Colour is kept for what carries meaning. One lapis blue, deeper and quieter
+//! than the usual interface blue, is the colour of data: a bar is steps of it
+//! alone, from what a worktree shares to what is most its own. Data shared
+//! with other worktrees takes no room of its own, so it is not filled at all
+//! but hatched, set a little apart; then, solid, git's database, the caches
+//! the worktree holds, and its source, each step further from the ground.
+//! Solid against hatched is what tells real room from shared at a glance.
+//! Green, amber and red say merged, uncommitted and gone, always beside an
+//! icon and words.
 //!
-//! Neighbours in a bar were checked to stay apart for colour-blind readers
-//! (at least 20 in OKLab ×100 under protanopia, deuteranopia and tritanopia,
-//! as for full colour vision) and text against the ground and the cards
-//! (4.5:1 or better). The ghost alone falls short against the surface, which is why
-//! it carries the outline and is never the only way a value is told.
+//! The solid steps are even in lightness, about 20 in OKLab ×100 apart (48,
+//! 68 and 88 in dark; 67, 48 and 27 in light), so neighbours stay 18 to 22
+//! apart under protanopia, deuteranopia and tritanopia as for full colour
+//! vision, while the bar reads as one colour rather than a row of tiles. Text
+//! keeps 4.5:1 or better against the ground and the cards. The hatching is
+//! told by its texture, which no colour vision loses, and is never the only
+//! way a value is told: the key, the hover and the table name it too.
 
 use gpui_kit::component::{ActiveTheme, Theme, ThemeConfig, ThemeMode};
 use gpui_kit::{App, Hsla, SharedString, Window, font, px, rgb};
@@ -56,10 +62,10 @@ const LIGHT: Tones = Tones {
     edge: 0xD8D8DC,
     hover: 0xF7F7F8,
     selected: 0xF3F3F5,
-    source: 0x1F1F22,
+    source: 0x132643,
     cache: 0x2C5C9E,
-    shared: 0xCBD8EA,
-    git: 0x9C9CA1,
+    shared: 0x7F9CC8,
+    git: 0x8095B7,
     success: 0x22855A,
     warning: 0xA9690C,
     danger: 0xC43F3B,
@@ -77,10 +83,10 @@ const DARK: Tones = Tones {
     edge: 0x38383C,
     hover: 0x1F1F22,
     selected: 0x252528,
-    source: 0xDCDBD7,
+    source: 0xC6D8F1,
     cache: 0x6F9AD6,
-    shared: 0x24324A,
-    git: 0x6B6A66,
+    shared: 0x5A7DB0,
+    git: 0x4A5E80,
     success: 0x4FBF8B,
     warning: 0xDDA341,
     danger: 0xEC6A62,

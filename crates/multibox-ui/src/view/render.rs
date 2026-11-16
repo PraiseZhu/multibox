@@ -24,7 +24,7 @@ use gpui_kit::{
     AnyElement, AnyView, App, BoxShadow, ClickEvent, Context, Div, ElementId, FontWeight, Hsla,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render,
     SharedString, Stateful, StatefulInteractiveElement, Styled, Window, WindowControlArea, div,
-    hsla, point, prelude::FluentBuilder, px, relative, rgb,
+    hsla, pattern_slash, point, prelude::FluentBuilder, px, relative, rgb,
 };
 use std::sync::atomic::Ordering;
 
@@ -289,27 +289,32 @@ struct Part {
     label: &'static str,
     long: &'static str,
     color: Hsla,
-    /// Shared data: drawn hollow, since it takes no room of its own.
+    /// Data that takes no room of its own, shared or spared: hatched, not
+    /// filled.
     ghost: bool,
     bytes: u64,
 }
 
-/// What only this worktree holds, then what it shares with others. Every bar
-/// runs in this order, so the hollow part always ends it and what deleting the
-/// worktree would free is one unbroken stretch.
+/// What a worktree shares with others, then what only it holds. Every bar and
+/// key runs in this order: the hollow part that stays put always starts it,
+/// and what deleting the worktree would free is one unbroken stretch after.
 fn parts(split: &Split, palette: &Palette) -> [Part; 4] {
-    let [source, cache, git] = own_parts(split, palette);
-    [source, cache, git, shared_part(split, palette)]
+    let [git, cache, source] = own_parts(split, palette);
+    [shared_part(split, palette), git, cache, source]
 }
 
+/// From what is least the worktree's own to what is most: git's database,
+/// which every worktree reads, its caches, its source. The palette steps
+/// evenly away from the ground in the same order, so a bar reads as one
+/// colour deepening rather than a row of tiles.
 fn own_parts(split: &Split, palette: &Palette) -> [Part; 3] {
     [
         Part {
-            label: "源码",
-            long: "源码",
-            color: palette.source,
+            label: "Git",
+            long: "Git 数据",
+            color: palette.git,
             ghost: false,
-            bytes: split.tracked,
+            bytes: split.git,
         },
         Part {
             label: "独有缓存",
@@ -319,11 +324,11 @@ fn own_parts(split: &Split, palette: &Palette) -> [Part; 3] {
             bytes: split.untracked,
         },
         Part {
-            label: "Git",
-            long: "Git 数据",
-            color: palette.git,
+            label: "源码",
+            long: "源码",
+            color: palette.source,
             ghost: false,
-            bytes: split.git,
+            bytes: split.tracked,
         },
     ]
 }
@@ -384,14 +389,22 @@ fn own_note(main: bool, own: u64, linked: u64, reflink: bool) -> String {
 }
 
 fn swatch(part: &Part, palette: &Palette) -> Div {
-    div()
-        .size(px(8.))
-        .flex_none()
-        .rounded(px(2.))
-        .bg(part.color)
-        .when(part.ghost, |mark| {
-            mark.border_1().border_color(palette.cache)
-        })
+    fill(
+        div().size(px(8.)).flex_none().rounded(px(2.)),
+        part,
+        palette,
+    )
+}
+
+/// Solid for what takes room on disk. Data shared with other worktrees takes
+/// none of its own, so it is only hatched over the card: the solid stretch is
+/// what the worktree really holds, at a glance.
+fn fill<E: Styled>(element: E, part: &Part, palette: &Palette) -> E {
+    if part.ghost {
+        element.bg(pattern_slash(palette.shared, 1.5, 4.))
+    } else {
+        element.bg(part.color)
+    }
 }
 
 /// A bar split by kind, with a gap between neighbours and rounded ends. Each
@@ -435,8 +448,9 @@ fn stack(
                 .rounded(px(1.5))
                 .when(place == 0, |bar| bar.rounded_l(px(4.)))
                 .when(place == last, |bar| bar.rounded_r(px(4.)))
-                .bg(part.color)
-                .when(part.ghost, |bar| bar.border_1().border_color(palette.cache))
+                // A wider gap after what is shared: two things, not one bar.
+                .when(part.ghost && place != last, |bar| bar.mr(px(3.)))
+                .map(|bar| fill(bar, part, palette))
                 .tooltip(tip(format!("{} {}", part.long, format::bytes(part.bytes))))
         }))
 }
@@ -1550,7 +1564,7 @@ impl MultiboxApp {
 
             // Own, shared and the sum, the one relation every number here
             // keeps: the figure is what is the worktree's alone, the bar runs
-            // the whole size with the shared part hollow at its end, and a
+            // the whole size with the shared part hollow at its start, and a
             // bracket under each half names it.
             let bar: AnyElement = if shared > 0 {
                 let half = |id: &'static str, kinds: &[Part], bytes: u64| {
@@ -1581,21 +1595,21 @@ impl MultiboxApp {
                     .gap(px(4.))
                     .child(
                         h_flex()
-                            .gap(px(2.))
-                            .child(half("own", &mine, own))
-                            .child(half("shared", std::slice::from_ref(&theirs), shared)),
+                            .gap(px(5.))
+                            .child(half("shared", std::slice::from_ref(&theirs), shared))
+                            .child(half("own", &mine, own)),
                     )
                     .child(
                         h_flex()
                             .justify_between()
                             .gap(px(12.))
                             .child(
-                                text(12., palette.ink2)
-                                    .child(format!("独占 {}", format::bytes(own))),
-                            )
-                            .child(
                                 text(12., palette.ink3)
                                     .child(format!("共用 {}", format::bytes(shared))),
+                            )
+                            .child(
+                                text(12., palette.ink2)
+                                    .child(format!("独占 {}", format::bytes(own))),
                             ),
                     )
                     .into_any_element()
