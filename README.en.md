@@ -44,11 +44,12 @@ Every figure and how it was measured: [docs/benchmarks.md](docs/benchmarks.md).
 
 ## The window
 
-`git multibox ui` opens a window showing what each worktree takes on disk,
-where that space goes, and whether it has uncommitted work or is already
-merged. New, finish, remove and lock are buttons, and one cleanup removes
-merged worktrees and what interrupted removals left behind, listing everything
-before it deletes. The window is in Chinese for now.
+`git multibox ui` opens a window showing what each worktree really takes on
+disk, the space and the builds and imports Multibox saved, and whether a
+worktree has uncommitted work or is already merged. New, finish, remove and
+lock are buttons, and one cleanup removes merged worktrees and what
+interrupted removals left behind, listing everything before it deletes. The
+window is in Chinese for now.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/ui-dark.png">
