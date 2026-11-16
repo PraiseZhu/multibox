@@ -4,7 +4,7 @@
 #
 # It downloads the latest release, checks it against SHA256SUMS, puts both in
 # %LOCALAPPDATA%\Programs\multibox and adds that directory to your PATH.
-# MULTIBOX_VERSION picks another release, such as v0.1.1. MULTIBOX_INSTALL_DIR
+# MULTIBOX_VERSION picks another release, such as v0.1.6. MULTIBOX_INSTALL_DIR
 # picks another directory, which is then left to you to put on PATH.
 
 # A script block keeps variables out of the caller's session, and errors are

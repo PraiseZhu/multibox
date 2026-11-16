@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/fpgames/multibox/main/install.sh | sh
 #
 # It downloads the latest release, checks it against SHA256SUMS and puts both in
-# ~/.local/bin. MULTIBOX_VERSION picks another release, such as v0.1.1, and
+# ~/.local/bin. MULTIBOX_VERSION picks another release, such as v0.1.6, and
 # MULTIBOX_INSTALL_DIR another directory.
 set -eu
 
