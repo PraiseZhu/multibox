@@ -46,6 +46,10 @@ fn write_repository(state: &Path, repository: &Path) -> std::io::Result<()> {
 }
 
 fn state_file() -> Option<PathBuf> {
+    Some(state_dir()?.join("last-repository.json"))
+}
+
+fn state_dir() -> Option<PathBuf> {
     let env_path = |name| {
         std::env::var_os(name)
             .map(PathBuf::from)
@@ -58,7 +62,48 @@ fn state_file() -> Option<PathBuf> {
     #[cfg(not(any(windows, target_os = "macos")))]
     let base = env_path("XDG_STATE_HOME")
         .or_else(|| env_path("HOME").map(|home| home.join(".local/state")))?;
-    Some(base.join("multibox/last-repository.json"))
+    Some(base.join("multibox"))
+}
+
+/// Where the last measurement of the worktree at `worktree` keeps what the
+/// next one can reuse: one file per worktree, named by its path.
+pub fn memo_file(worktree: &Path) -> Option<PathBuf> {
+    Some(memo_dir()?.join(format!("{:016x}.bin", fnv1a(worktree))))
+}
+
+fn memo_dir() -> Option<PathBuf> {
+    Some(state_dir()?.join("measured"))
+}
+
+/// A hash of a path that stays the same from one build to the next, which
+/// the standard library's does not promise.
+fn fnv1a(path: &Path) -> u64 {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+        })
+}
+
+/// Drops the memos of worktrees no measurement has used for a month: most
+/// belong to worktrees long removed, and each can hold a few megabytes.
+pub fn forget_old_memos() {
+    const MONTH: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+    let Some(entries) = memo_dir().and_then(|dir| fs::read_dir(dir).ok()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > MONTH);
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(test)]

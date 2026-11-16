@@ -43,6 +43,20 @@ enum Busy {
     Lock,
 }
 
+/// Which worktrees a refresh measures, and how.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Measure {
+    /// Only those not measured yet: after an operation, which changes git's
+    /// state rather than what is on disk elsewhere.
+    Missing,
+    /// All of them, taking every directory unchanged since the last
+    /// measurement from it: on opening a repository.
+    Changed,
+    /// All of them from scratch, trusting nothing kept: what refreshing by
+    /// hand asks for.
+    All,
+}
+
 /// Everything that can go without losing anything: worktrees whose branch is
 /// merged, directories an interrupted removal left behind, and records of
 /// worktrees whose directory is gone.
@@ -120,15 +134,14 @@ impl MultiboxApp {
             focus,
             _appearance: appearance,
         };
-        app.refresh(true, cx);
+        app.refresh(Measure::Changed, cx);
         app
     }
 
     // ---- loading -------------------------------------------------------
 
-    /// Reloads the worktree list and git facts. `rescan` measures every
-    /// worktree again; otherwise only worktrees not measured yet are.
-    fn refresh(&mut self, rescan: bool, cx: &mut Context<Self>) {
+    /// Reloads the worktree list and git facts, and measures as `kind` says.
+    fn refresh(&mut self, kind: Measure, cx: &mut Context<Self>) {
         let Some(dir) = self.repo.clone() else {
             return;
         };
@@ -141,11 +154,11 @@ impl MultiboxApp {
         self.loading = true;
         self.error = None;
         cx.notify();
-        let measured: HashSet<PathBuf> = if rescan {
-            HashSet::new()
-        } else {
-            self.usage.keys().cloned().collect()
+        let measured: HashSet<PathBuf> = match kind {
+            Measure::Missing => self.usage.keys().cloned().collect(),
+            Measure::Changed | Measure::All => HashSet::new(),
         };
+        let reuse = kind != Measure::All;
 
         cx.spawn(async move |this, cx| {
             let loaded = cx.background_spawn(async move { model::load(&dir) }).await;
@@ -199,33 +212,50 @@ impl MultiboxApp {
                 return;
             }
 
-            // One worktree at a time: they usually share a disk.
+            // Every worktree at once, with one set of threads between them, so
+            // a small one comes in long before a large one.
             let all: Vec<PathBuf> = snapshot
                 .worktrees
                 .iter()
                 .filter(|worktree| worktree.exists)
                 .map(|worktree| worktree.path.clone())
                 .collect();
-            for root in all.iter().filter(|root| !measured.contains(*root)) {
-                let progress = Arc::new(ScanProgress::default());
-                let current = this
-                    .update(cx, |this, cx| {
-                        if this.generation != generation {
-                            return false;
-                        }
+            let roots: Vec<PathBuf> = all
+                .iter()
+                .filter(|root| !measured.contains(*root))
+                .cloned()
+                .collect();
+            if roots.is_empty() {
+                return;
+            }
+            let progress: Vec<Arc<ScanProgress>> = roots.iter().map(|_| Arc::default()).collect();
+            let current = this
+                .update(cx, |this, cx| {
+                    if this.generation != generation {
+                        return false;
+                    }
+                    for (root, progress) in roots.iter().zip(&progress) {
                         this.scanning.insert(root.clone(), progress.clone());
-                        this.start_ticker(cx);
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !current {
-                    return;
-                }
-                let (target, others, watch) = (root.clone(), all.clone(), progress.clone());
-                let result = cx
-                    .background_spawn(async move { measure(&target, &others, &watch) })
-                    .await;
+                    }
+                    this.start_ticker(cx);
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            let (sender, receiver) = async_channel::unbounded();
+            let targets = roots.clone();
+            cx.background_spawn(async move {
+                measure(&targets, &all, &progress, reuse, |index, result| {
+                    // Gone only when a newer refresh took over.
+                    let _ = sender.send_blocking((index, result));
+                });
+            })
+            .detach();
+            while let Ok((index, result)) = receiver.recv().await {
+                let root = &roots[index];
                 let current = this
                     .update(cx, |this, cx| {
                         if this.generation != generation {
@@ -353,7 +383,7 @@ impl MultiboxApp {
         self.trash_size = None;
         self.selected = None;
         self.refreshed_at = None;
-        self.refresh(true, cx);
+        self.refresh(Measure::Changed, cx);
     }
 
     fn pick_repo(&mut self, cx: &mut Context<Self>) {
@@ -410,7 +440,7 @@ impl MultiboxApp {
                     }
                     None => this.global_busy = None,
                 }
-                this.refresh(false, cx);
+                this.refresh(Measure::Missing, cx);
             });
             let _ = window.update(cx, |_, window, cx| window.push_notification(note, cx));
         })
@@ -867,7 +897,7 @@ impl MultiboxApp {
             };
             let _ = this.update(cx, |this, cx| {
                 this.adding = None;
-                this.refresh(false, cx);
+                this.refresh(Measure::Missing, cx);
             });
             let _ = window.update(cx, |_, window, cx| window.push_notification(note, cx));
         })
@@ -885,10 +915,64 @@ impl MultiboxApp {
     }
 }
 
-/// Measures one worktree, leaving out the worktrees nested inside it.
-fn measure(root: &Path, all: &[PathBuf], progress: &ScanProgress) -> Result<Usage, String> {
-    let skip = all
+/// Measures the worktrees at `roots` together, leaving out of each the
+/// worktrees nested inside it. `done` hears of each by its place in `roots`.
+fn measure(
+    roots: &[PathBuf],
+    all: &[PathBuf],
+    progress: &[Arc<ScanProgress>],
+    reuse: bool,
+    done: impl Fn(usize, Result<Usage, String>) + Sync,
+) {
+    // A memo holds while the worktrees are the ones it was made with: a
+    // worktree made or removed adds or drops links to files in the others
+    // without moving their directories' times.
+    let mut worktrees: Vec<String> = all.iter().map(|path| path.display().to_string()).collect();
+    worktrees.sort();
+    let key = worktrees.join("\n");
+    let files: Vec<Option<PathBuf>> = roots.iter().map(|root| state::memo_file(root)).collect();
+    let memos: Vec<Option<usage::Memo>> = files
         .iter()
+        .map(|file| {
+            file.as_deref()
+                .filter(|_| reuse)
+                .and_then(|file| usage::Memo::load(file, &key))
+        })
+        .collect();
+    let requests: Vec<ScanRequest<'_>> = roots
+        .iter()
+        .zip(progress)
+        .zip(&memos)
+        .map(|((root, progress), memo)| ScanRequest {
+            root,
+            skip: nested(root, all),
+            tracked: usage::tracked_paths(root),
+            links: true,
+            previous: memo.as_ref(),
+            progress,
+        })
+        .collect();
+    usage::scan_all(&requests, |index, usage| {
+        let usage = usage.map(|mut usage| {
+            // A cancelled scan read only some directories: its memo would
+            // replace a whole one with part of one.
+            let memo = std::mem::take(&mut usage.memo);
+            if !progress[index].cancel.load(Ordering::Relaxed)
+                && let Some(file) = &files[index]
+                && let Err(err) = memo.save(file, &key)
+            {
+                eprintln!("multibox-ui: cannot keep the measurement: {err}");
+            }
+            usage
+        });
+        done(index, usage.map_err(|err| err.to_string()));
+    });
+    state::forget_old_memos();
+}
+
+/// The worktrees inside `root`, relative to it with `/`.
+fn nested(root: &Path, all: &[PathBuf]) -> HashSet<String> {
+    all.iter()
         .filter(|other| other.as_path() != root)
         .filter_map(|other| other.strip_prefix(root).ok())
         .map(|rel| {
@@ -898,15 +982,7 @@ fn measure(root: &Path, all: &[PathBuf], progress: &ScanProgress) -> Result<Usag
                 .join("/")
         })
         .filter(|rel| !rel.is_empty())
-        .collect();
-    usage::scan(&ScanRequest {
-        root,
-        skip,
-        tracked: usage::tracked_paths(root),
-        links: true,
-        progress,
-    })
-    .map_err(|err| err.to_string())
+        .collect()
 }
 
 /// `../<repo>-2`, `../<repo>-3`, … whichever does not exist yet.

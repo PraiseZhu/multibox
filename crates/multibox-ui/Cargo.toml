@@ -14,6 +14,8 @@ name = "multibox-ui"
 path = "src/main.rs"
 
 [dependencies]
+# Hands each worktree's measurement to the window as soon as it is done.
+async-channel = "2"
 multibox-clone.workspace = true
 multibox-core.workspace = true
 # GPUI (Zed's UI framework) with the GPUI Kit components, pinned together.

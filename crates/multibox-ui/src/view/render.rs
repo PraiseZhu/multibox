@@ -8,7 +8,7 @@
 //! Rows carry no buttons. A worktree is acted on from the inspector, where
 //! each action has room for its name.
 
-use super::{Busy, Cleanup, MultiboxApp, Refresh, open_terminal};
+use super::{Busy, Cleanup, Measure, MultiboxApp, Refresh, open_terminal};
 use crate::format;
 use crate::model::{self, Details, Snapshot, Worktree};
 use crate::theme::Palette;
@@ -338,16 +338,18 @@ fn shared_part(split: &Split, palette: &Palette) -> Part {
     }
 }
 
-/// "最多" before a size that can only be an upper bound: on a cloning volume
-/// unchanged data shares blocks the file system does not report.
-fn at_most(figure: Div, size: f32, largest: f32, bound: bool, palette: &Palette) -> Div {
+/// A size, set as `figure` sets it, with "最多" before it when `bound`: on a
+/// cloning volume unchanged data shares blocks the file system does not
+/// report, so a size there is an upper bound. Nothing is bounded by nothing
+/// measured yet, so zero goes without it.
+fn at_most(bytes: u64, number: f32, unit: f32, bound: bool, palette: &Palette) -> Div {
     h_flex()
         .items_end()
-        .gap(px(size * 0.4))
-        .when(bound, |row| {
-            row.child(run(size, largest, palette.ink2, palette).child("最多"))
+        .gap(px(unit * 0.4))
+        .when(bound && bytes > 0, |row| {
+            row.child(run(unit, number, palette.ink2, palette).child("最多"))
         })
-        .child(figure)
+        .child(figure(bytes, number, unit, palette))
 }
 
 /// Why a cloning volume's sizes are upper bounds, in a sentence that fits the
@@ -684,7 +686,7 @@ impl MultiboxApp {
                             .tooltip(refreshed)
                             .loading(self.loading || !self.scanning.is_empty())
                             .disabled(self.repo.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(true, cx))),
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(Measure::All, cx))),
                     )
                     .child(
                         Button::new("theme")
@@ -848,13 +850,7 @@ impl MultiboxApp {
             IconName::Layers,
             "占用磁盘",
             Some(info("usage-info", explain, palette)),
-            at_most(
-                figure(actual, FIGURE, UNIT, palette),
-                UNIT,
-                FIGURE,
-                reflink,
-                palette,
-            ),
+            at_most(actual, FIGURE, UNIT, reflink, palette),
             sentence,
             Some(
                 stack("whole", &parts(&on_disk, palette), BAR, TILE_SPAN, palette)
@@ -1042,13 +1038,7 @@ impl MultiboxApp {
                     palette,
                 )
             }),
-            at_most(
-                figure(cleanup.bytes, FIGURE, UNIT, palette),
-                UNIT,
-                FIGURE,
-                reflink,
-                palette,
-            ),
+            at_most(cleanup.bytes, FIGURE, UNIT, reflink, palette),
             line(what.join(" · "), palette),
             Some(
                 Button::new("clean-up")
@@ -1136,13 +1126,19 @@ impl MultiboxApp {
                             .child(text(12., palette.ink2).truncate().child(worktree.label())),
                     ),
             )
+            // One line high even while git is still being asked and there is
+            // nothing to show, so the row does not grow when the answer comes.
             .child(
-                h_flex().gap_x(px(14.)).overflow_hidden().children(
-                    marks
-                        .into_iter()
-                        .enumerate()
-                        .map(|(id, item)| mark(item, id, palette)),
-                ),
+                h_flex()
+                    .h(px(20.))
+                    .gap_x(px(14.))
+                    .overflow_hidden()
+                    .children(
+                        marks
+                            .into_iter()
+                            .enumerate()
+                            .map(|(id, item)| mark(item, id, palette)),
+                    ),
             );
 
         let bar: AnyElement = match (usage, self.scanning.get(&path)) {
@@ -1663,16 +1659,20 @@ impl MultiboxApp {
                     h_flex()
                         .items_end()
                         .justify_between()
-                        .child(at_most(
-                            figure(own, 26., 14., palette),
-                            14.,
-                            26.,
-                            reflink,
-                            palette,
-                        ))
+                        .child(at_most(own, 26., 14., reflink, palette))
                         .child(
                             run(12., 26., palette.ink3, palette)
-                                .child(format!("{} 个文件", format::count(usage.files))),
+                                .id("files")
+                                .child(format!("{} 个文件", format::count(usage.files)))
+                                .tooltip(tip(format!(
+                                    "测量用了 {:.1} 秒{}",
+                                    usage.elapsed.as_secs_f64(),
+                                    if usage.skipped > 0 {
+                                        format!("，{} 项读不了", format::count(usage.skipped))
+                                    } else {
+                                        String::new()
+                                    }
+                                ))),
                         ),
                 )
                 .child(bar)
@@ -2001,7 +2001,7 @@ impl Render for MultiboxApp {
         v_flex()
             .size_full()
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &Refresh, _, cx| this.refresh(true, cx)))
+            .on_action(cx.listener(|this, _: &Refresh, _, cx| this.refresh(Measure::All, cx)))
             .bg(palette.canvas)
             .text_color(palette.ink)
             .text_size(px(13.))
