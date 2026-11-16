@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 gpui_kit::actions!(multibox, [Refresh]);
 
@@ -42,6 +42,14 @@ enum Busy {
     Clean,
     Lock,
 }
+
+/// How often git is asked again while the window is in front. Its answer for
+/// a repository of a million files takes about a tenth of a second.
+const POLL_EVERY: Duration = Duration::from_secs(30);
+
+/// How old the last measurement must be before coming back to the window
+/// measures again, from what changed since.
+const REMEASURE_AFTER: Duration = Duration::from_secs(120);
 
 /// Which worktrees a refresh measures, and how.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,9 +105,15 @@ pub struct MultiboxApp {
     /// moved yet: macOS leaves moving a window without a system title bar to
     /// the app.
     moving_window: bool,
+    /// The window is the one in front, taking the keyboard.
+    active: bool,
+    /// When every worktree was last measured, from scratch or from what
+    /// changed.
+    measured_at: Option<Instant>,
     window: AnyWindowHandle,
     focus: FocusHandle,
     _appearance: Subscription,
+    _activation: Subscription,
 }
 
 impl MultiboxApp {
@@ -110,6 +124,13 @@ impl MultiboxApp {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             gpui_kit::component::Theme::sync_system_appearance(Some(window), cx);
             cx.notify();
+        });
+        // Coming back to the window brings it up to date.
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.active = window.is_window_active();
+            if this.active {
+                this.refresh_quietly(true, cx);
+            }
         });
         let mut app = MultiboxApp {
             repo,
@@ -130,15 +151,66 @@ impl MultiboxApp {
             generation: 0,
             ticking: false,
             moving_window: false,
+            active: window.is_window_active(),
+            measured_at: None,
             window: window.window_handle(),
             focus,
             _appearance: appearance,
+            _activation: activation,
         };
         app.refresh(Measure::Changed, cx);
+        app.keep_up(cx);
         app
     }
 
     // ---- loading -------------------------------------------------------
+
+    /// While the window is in front, asks git again every so often: what a
+    /// worktree holds changes while it is looked at, and other tools add and
+    /// remove worktrees.
+    fn keep_up(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(POLL_EVERY).await;
+                let alive = this.update(cx, |this, cx| {
+                    if this.active {
+                        this.refresh_quietly(false, cx);
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Brings what the window shows up to date without being asked: the
+    /// worktrees and git's state of each, and with `remeasure` their sizes
+    /// too, from what changed, once the last measurement is a while old.
+    /// Never while something is under way: a refresh would cancel a
+    /// measurement and start it over, and an operation refreshes when done.
+    fn refresh_quietly(&mut self, remeasure: bool, cx: &mut Context<Self>) {
+        let under_way = self.loading
+            || !self.scanning.is_empty()
+            || self.adding.is_some()
+            || !self.busy.is_empty()
+            || self.global_busy.is_some();
+        if self.repo.is_none() || under_way {
+            return;
+        }
+        let stale = self
+            .measured_at
+            .is_none_or(|at| at.elapsed() >= REMEASURE_AFTER);
+        let kind = if remeasure && stale {
+            Measure::Changed
+        } else {
+            Measure::Missing
+        };
+        self.refresh(kind, cx);
+        // Nobody asked: the refresh button keeps still.
+        self.loading = false;
+    }
 
     /// Reloads the worktree list and git facts, and measures as `kind` says.
     fn refresh(&mut self, kind: Measure, cx: &mut Context<Self>) {
@@ -159,6 +231,9 @@ impl MultiboxApp {
             Measure::Changed | Measure::All => HashSet::new(),
         };
         let reuse = kind != Measure::All;
+        if kind != Measure::Missing {
+            self.measured_at = Some(Instant::now());
+        }
 
         cx.spawn(async move |this, cx| {
             let loaded = cx.background_spawn(async move { model::load(&dir) }).await;
