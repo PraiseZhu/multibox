@@ -1,15 +1,17 @@
 //! The window's colours, in one place.
 //!
-//! The chrome is neutral: warm paper and ink, with the buttons in ink too.
-//! Colour is kept for what carries meaning. One blue marks the caches a
+//! The chrome is neutral: white cards on a warm grey ground in light mode,
+//! graphite in dark, with the buttons in ink. Colour is kept for what carries
+//! meaning. One lapis blue, deeper and quieter than the usual interface blue,
+//! marks the caches a
 //! worktree holds, and its ghost, outlined in the same blue, marks cache data
 //! shared with other worktrees, which takes no room of its own. Green, amber
 //! and red say merged, uncommitted and gone, always beside an icon and words.
 //!
 //! Neighbours in a bar were checked to stay apart for colour-blind readers
-//! (at least 22 in OKLab ×100 under protanopia, deuteranopia and tritanopia,
-//! 23 or more for full colour vision) and text against both surfaces (4.5:1
-//! or better). The ghost alone falls short against the surface, which is why
+//! (at least 20 in OKLab ×100 under protanopia, deuteranopia and tritanopia,
+//! as for full colour vision) and text against the ground and the cards
+//! (4.5:1 or better). The ghost alone falls short against the surface, which is why
 //! it carries the outline and is never the only way a value is told.
 
 use gpui_kit::component::{ActiveTheme, Theme, ThemeConfig, ThemeMode};
@@ -17,8 +19,11 @@ use gpui_kit::{App, Hsla, SharedString, Window, font, px, rgb};
 use std::rc::Rc;
 
 struct Tones {
+    /// The ground the cards sit on.
     canvas: u32,
-    /// The inspector, a step back from the canvas.
+    /// Cards, the top bar and the inspector.
+    card: u32,
+    /// The inspector.
     panel: u32,
     /// Dialogs, menus and tooltips, a step forward.
     raised: u32,
@@ -40,43 +45,45 @@ struct Tones {
 }
 
 const LIGHT: Tones = Tones {
-    canvas: 0xFCFBF9,
-    panel: 0xF5F3EF,
+    canvas: 0xF5F4F1,
+    card: 0xFFFFFF,
+    panel: 0xFFFFFF,
     raised: 0xFFFFFF,
-    ink: 0x1B1A18,
-    ink2: 0x55524D,
-    ink3: 0x716D66,
-    hairline: 0xE5E2DC,
-    edge: 0xD8D4CD,
-    hover: 0xF3F1ED,
-    selected: 0xECE9E3,
-    source: 0x23211E,
-    cache: 0x2F6BDE,
-    shared: 0xC3D4F5,
-    git: 0x8A857D,
-    success: 0x1F8A57,
-    warning: 0xB4700A,
-    danger: 0xCC3D3D,
+    ink: 0x1A1918,
+    ink2: 0x53514D,
+    ink3: 0x6C6A65,
+    hairline: 0xE8E6E1,
+    edge: 0xD9D6D0,
+    hover: 0xF5F4F1,
+    selected: 0xEFEEEA,
+    source: 0x22211F,
+    cache: 0x2C5C9E,
+    shared: 0xCBD8EA,
+    git: 0x9B978F,
+    success: 0x22855A,
+    warning: 0xA9690C,
+    danger: 0xC43F3B,
 };
 
 const DARK: Tones = Tones {
-    canvas: 0x151413,
-    panel: 0x1B1A18,
-    raised: 0x21201E,
-    ink: 0xEEECE8,
-    ink2: 0xAFABA5,
-    ink3: 0x8B8780,
-    hairline: 0x2B2927,
-    edge: 0x3A3835,
-    hover: 0x1E1D1B,
-    selected: 0x282624,
-    source: 0xE9E6E1,
-    cache: 0x5B8DEF,
-    shared: 0x283650,
-    git: 0x77736C,
-    success: 0x4CC38A,
-    warning: 0xE5A63A,
-    danger: 0xF0625F,
+    canvas: 0x121213,
+    card: 0x1A1A1C,
+    panel: 0x1A1A1C,
+    raised: 0x222225,
+    ink: 0xEDEDEB,
+    ink2: 0xAAA9A5,
+    ink3: 0x86857F,
+    hairline: 0x29292C,
+    edge: 0x38383C,
+    hover: 0x1F1F22,
+    selected: 0x252528,
+    source: 0xDCDBD7,
+    cache: 0x6F9AD6,
+    shared: 0x24324A,
+    git: 0x6B6A66,
+    success: 0x4FBF8B,
+    warning: 0xDDA341,
+    danger: 0xEC6A62,
 };
 
 fn tones(dark: bool) -> &'static Tones {
@@ -92,9 +99,9 @@ fn hex(color: u32) -> String {
 fn config(dark: bool) -> ThemeConfig {
     let t = tones(dark);
     let (primary_hover, primary_active, on_danger, overlay) = if dark {
-        ("#ffffff", "#d9d6d1", hex(t.canvas), "#00000080")
+        ("#ffffff", "#d6d6d3", hex(t.canvas), "#00000080")
     } else {
-        ("#34322e", "#000000", "#ffffff".to_owned(), "#1b1a1833")
+        ("#33322f", "#000000", "#ffffff".to_owned(), "#1a191833")
     };
     let colors: serde_json::Map<String, serde_json::Value> = [
         ("background", hex(t.canvas)),
@@ -131,7 +138,7 @@ fn config(dark: bool) -> ThemeConfig {
         ("scrollbar.thumb.background", format!("{}80", hex(t.ink3))),
         ("scrollbar.thumb.hover.background", hex(t.ink3)),
         ("selection.background", format!("{}59", hex(t.cache))),
-        ("title_bar.background", hex(t.canvas)),
+        ("title_bar.background", hex(t.card)),
         ("title_bar.border", hex(t.hairline)),
         ("overlay", overlay.to_owned()),
     ]
@@ -170,6 +177,7 @@ pub fn toggle(window: &mut Window, cx: &mut App) {
 #[derive(Clone)]
 pub struct Palette {
     pub canvas: Hsla,
+    pub card: Hsla,
     pub panel: Hsla,
     pub ink: Hsla,
     pub ink2: Hsla,
@@ -208,6 +216,7 @@ impl Palette {
         let baseline = ((1. - ascent + descent) / 2.).max(0.);
         Palette {
             canvas: paint(t.canvas),
+            card: paint(t.card),
             panel: paint(t.panel),
             ink: paint(t.ink),
             ink2: paint(t.ink2),

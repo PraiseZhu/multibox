@@ -30,8 +30,15 @@ use std::sync::atomic::Ordering;
 /// Below this, the git share of a worktree is its one-line `.git` file.
 const GIT_WORTH_SHOWING: u64 = 64 * 1024;
 
-/// The share of a bar that is about a pixel wide.
-const SMALLEST_SHARE: f64 = 0.004;
+/// The narrowest part of a bar worth drawing, in pixels.
+const NARROWEST: f32 = 3.;
+
+/// About how long the bars run at full length, in pixels: the overview's, a
+/// row's at the size of the largest worktree, and the inspector's.
+const TILE_SPAN: f32 = 240.;
+const ROW_SPAN: f32 = 300.;
+const PANEL_SPAN: f32 = 300.;
+const ENTRY_SPAN: f32 = 96.;
 
 fn tip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let text: SharedString = text.into();
@@ -79,6 +86,68 @@ fn caption(label: impl Into<SharedString>, palette: &Palette) -> Div {
     text(12., palette.ink3)
         .font_weight(FontWeight::MEDIUM)
         .child(label.into())
+}
+
+/// A card: white on the grey ground, graphite on the dark one.
+fn card(palette: &Palette) -> Div {
+    v_flex()
+        .bg(palette.card)
+        .border_1()
+        .border_color(palette.hairline)
+        .rounded(px(10.))
+}
+
+/// The overview's figures, and the bars under them.
+const FIGURE: f32 = 26.;
+const UNIT: f32 = 13.;
+const BAR: f32 = 8.;
+
+/// One line of quiet text that never wraps.
+fn line(words: impl Into<SharedString>, palette: &Palette) -> Div {
+    text(12., palette.ink3).truncate().child(words.into())
+}
+
+/// One figure of the overview. Every tile has the same four lines, each of a
+/// fixed height: a title with its icon, the figure, a sentence, and a bar or
+/// a button. Side by side, each line then runs straight across all of them.
+fn tile(
+    icon: IconName,
+    title: impl Into<SharedString>,
+    meta: Option<AnyElement>,
+    figure: impl IntoElement,
+    sentence: impl IntoElement,
+    foot: Option<AnyElement>,
+    palette: &Palette,
+) -> Div {
+    card(palette)
+        .flex_1()
+        .min_w(px(160.))
+        .px(px(20.))
+        .py(px(16.))
+        .child(
+            h_flex()
+                .h(px(18.))
+                .gap(px(8.))
+                .child(glyph(icon, 14., palette.ink3).flex_none())
+                .child(caption(title, palette).flex_1().min_w_0().truncate())
+                .children(meta),
+        )
+        .child(h_flex().mt(px(14.)).h(px(FIGURE)).items_end().child(figure))
+        .child(
+            h_flex()
+                .mt(px(8.))
+                .h(px(18.))
+                .min_w_0()
+                .overflow_hidden()
+                .child(sentence),
+        )
+        .child(
+            h_flex()
+                .mt(px(12.))
+                .h(px(26.))
+                .w_full()
+                .children(foot.map(|foot| h_flex().w_full().child(foot))),
+        )
 }
 
 /// One kind of space in a bar.
@@ -136,21 +205,28 @@ fn swatch(part: &Part, palette: &Palette) -> Div {
 }
 
 /// A bar split by kind, with a gap between neighbours and rounded ends. Each
-/// part answers a hover with its name, size and share.
+/// part answers a hover with its name, size and share. `span` is about how
+/// many pixels the bar runs.
 fn stack(
     id: impl Into<ElementId>,
     parts: &[Part],
     height: f32,
+    span: f32,
     palette: &Palette,
 ) -> Stateful<Div> {
     let total: u64 = parts.iter().map(|part| part.bytes).sum();
-    // A part that would come out under a pixel wide is not drawn: stretched to
-    // a sliver one can see, it would claim several times its share. Its size
-    // is still in the legend and the table beside the bar.
+    // A part that would come out under a few pixels wide is not drawn. Next to
+    // the gap it reads as a stray line rather than a share, and stretched to
+    // something one can see it would claim several times its size. Rows are
+    // shortened to their worktree's size, so the test is in pixels, not in a
+    // share of the bar. The size is still in the legend, the tooltip and the
+    // inspector's table.
     let shown: Vec<(usize, &Part)> = parts
         .iter()
         .enumerate()
-        .filter(|(_, part)| part.bytes > 0 && part.bytes as f64 >= total as f64 * SMALLEST_SHARE)
+        .filter(|(_, part)| {
+            part.bytes > 0 && part.bytes as f32 / total.max(1) as f32 * span >= NARROWEST
+        })
         .collect();
     let last = shown.len().saturating_sub(1);
     h_flex()
@@ -325,7 +401,7 @@ impl MultiboxApp {
                             .px(px(8.))
                             .gap(px(4.))
                             .rounded(px(6.))
-                            .bg(palette.hover)
+                            .bg(palette.selected)
                             .child(glyph(IconName::GitBranch, 12., palette.ink3))
                             .child(
                                 text(12., palette.ink2)
@@ -354,8 +430,9 @@ impl MultiboxApp {
         h_flex()
             .flex_none()
             .h(px(56.))
-            .px(px(28.))
+            .px(px(24.))
             .gap(px(16.))
+            .bg(palette.card)
             .border_b_1()
             .border_color(palette.hairline)
             .child(title)
@@ -413,18 +490,10 @@ impl MultiboxApp {
 
     // ---- overview ------------------------------------------------------
 
-    fn overview(
-        &self,
-        snapshot: &Snapshot,
-        palette: &Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let present = snapshot.worktrees.iter().filter(|w| w.exists).count();
-        let measured = snapshot
-            .worktrees
-            .iter()
-            .filter(|w| self.usage.contains_key(&w.path))
-            .count();
+    /// Every kind of space summed over the measured worktrees, as files count
+    /// it and as the disk holds it, where data shared through hard links is
+    /// there once.
+    fn totals(&self, snapshot: &Snapshot) -> (Split, Split) {
         let mut whole = Split::default();
         for worktree in &snapshot.worktrees {
             if let Some(usage) = self.usage.get(&worktree.path) {
@@ -434,103 +503,99 @@ impl MultiboxApp {
                 whole.git += usage.split.git;
             }
         }
-        // On disk, data shared through hard links is there once.
-        let (actual, saved) = self.dedup;
+        let (_, saved) = self.dedup;
         let on_disk = Split {
             linked: whole.linked.saturating_sub(saved),
             ..whole
         };
+        (whole, on_disk)
+    }
+
+    fn overview(
+        &self,
+        snapshot: &Snapshot,
+        palette: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let reflink = self
             .details
             .get(&snapshot.main)
             .is_some_and(|details| details.reflink);
-
-        let note: AnyElement = if measured < present {
-            h_flex()
-                .gap(px(6.))
-                .child(Spinner::new().xsmall().color(palette.ink3))
-                .child(
-                    text(13., palette.ink2)
-                        .child(format!("正在测量，{measured}/{present} 个工作区")),
-                )
-                .into_any_element()
-        } else if saved > 0 {
-            text(13., palette.ink2)
-                .child(format!(
-                    "{present} 个工作区的文件合计 {}，共享省下 {}",
-                    format::bytes(whole.total()),
-                    format::bytes(saved)
-                ))
-                .into_any_element()
-        } else {
-            text(13., palette.ink2)
-                .child(format!("{present} 个工作区"))
-                .into_any_element()
-        };
-        let explain = if reflink {
-            "按文件大小统计。这个卷上没改过的文件和源工作区共用数据，实际占用比这里小。"
-        } else {
-            "按文件大小统计。多个工作区通过硬链接共用的文件只算一次。"
-        };
-        let kinds = parts(&on_disk, palette);
-        let usage = v_flex()
-            .flex_1()
-            .min_w(px(340.))
-            .gap(px(6.))
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .child(caption("占用磁盘", palette))
-                    .child(
-                        div()
-                            .id("usage-info")
-                            .child(glyph(IconName::Info, 12., palette.ink3))
-                            .tooltip(tip(explain)),
-                    ),
-            )
-            .child(figure(actual, 34., 16., palette))
-            .child(note)
-            .child(
-                div()
-                    .pt(px(10.))
-                    .child(stack("whole", &kinds, 10., palette)),
-            )
-            .child(
-                h_flex()
-                    .pt(px(4.))
-                    .gap_x(px(18.))
-                    .gap_y(px(4.))
-                    .flex_wrap()
-                    .children(kinds.iter().filter(|part| part.bytes > 0).map(|part| {
-                        h_flex()
-                            .gap(px(6.))
-                            .child(swatch(part, palette))
-                            .child(text(12., palette.ink2).child(part.label))
-                            .child(
-                                text(12., palette.ink)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(format::bytes(part.bytes)),
-                            )
-                    })),
-            );
-
         h_flex()
-            .items_start()
+            .items_stretch()
             .flex_wrap()
-            .gap_x(px(44.))
-            .gap_y(px(28.))
-            .child(usage)
+            .gap(px(16.))
+            .child(self.occupied(snapshot, reflink, palette))
             .child(self.disk(snapshot, reflink, palette))
             .child(self.reclaim(palette, cx))
             .into_any_element()
     }
 
+    fn occupied(&self, snapshot: &Snapshot, reflink: bool, palette: &Palette) -> Div {
+        let present = snapshot.worktrees.iter().filter(|w| w.exists).count();
+        let measured = snapshot
+            .worktrees
+            .iter()
+            .filter(|w| self.usage.contains_key(&w.path))
+            .count();
+        let (whole, on_disk) = self.totals(snapshot);
+        let (actual, saved) = self.dedup;
+
+        let sentence: AnyElement = if measured < present {
+            h_flex()
+                .gap(px(6.))
+                .child(Spinner::new().xsmall().color(palette.ink3))
+                .child(line(
+                    format!("正在测量，{measured}/{present} 个工作区"),
+                    palette,
+                ))
+                .into_any_element()
+        } else if saved > 0 {
+            line(format!("共享省下 {}", format::bytes(saved)), palette).into_any_element()
+        } else {
+            line(format!("{present} 个工作区"), palette).into_any_element()
+        };
+        let explain = if reflink {
+            format!(
+                "各工作区的文件合计 {}。这个卷上没改过的文件和源工作区共用数据，实际占用比这里小。",
+                format::bytes(whole.total())
+            )
+        } else {
+            format!(
+                "各工作区的文件合计 {}，通过硬链接共用的只算一次。",
+                format::bytes(whole.total())
+            )
+        };
+        let info = div()
+            .id("usage-info")
+            .child(glyph(IconName::Info, 13., palette.ink3))
+            .tooltip(tip(explain))
+            .into_any_element();
+        tile(
+            IconName::Layers,
+            "占用磁盘",
+            Some(info),
+            figure(actual, FIGURE, UNIT, palette),
+            sentence,
+            Some(
+                stack("whole", &parts(&on_disk, palette), BAR, TILE_SPAN, palette)
+                    .into_any_element(),
+            ),
+            palette,
+        )
+    }
+
     fn disk(&self, snapshot: &Snapshot, reflink: bool, palette: &Palette) -> Div {
-        let block = v_flex().flex_none().w(px(196.)).gap(px(6.));
         let Some(volume) = snapshot.volume_of(&snapshot.main) else {
-            return block
-                .child(caption("磁盘", palette))
-                .child(text(13., palette.ink2).child("没找到所在的卷"));
+            return tile(
+                IconName::HardDrive,
+                "磁盘",
+                None,
+                run(FIGURE, FIGURE, palette.ink3, palette).child("—"),
+                line("没找到所在的卷", palette),
+                None,
+                palette,
+            );
         };
         let used = volume.total.saturating_sub(volume.free);
         let share = used as f32 / volume.total.max(1) as f32;
@@ -544,69 +609,69 @@ impl MultiboxApp {
         } else {
             "这个卷上新工作区是完整的一份，只有写一次就不再改的缓存通过硬链接共用。放到 Dev Drive 上可以共用全部数据。"
         };
-        block
+        let tag = h_flex()
+            .id("filesystem")
+            .flex_none()
+            .h(px(18.))
+            .px(px(6.))
+            .rounded(px(4.))
+            .bg(palette.selected)
+            .child(text(11., palette.ink2).child(filesystem))
+            .tooltip(tip(mode))
+            .into_any_element();
+        let meter = div()
+            .w_full()
+            .h(px(BAR))
+            .rounded(px(BAR / 2.))
+            .bg(palette.selected)
             .child(
-                h_flex()
-                    .justify_between()
-                    .child(caption(
-                        format!("磁盘 {}", volume.root.trim_end_matches(['\\', '/'])),
-                        palette,
-                    ))
-                    .child(
-                        div()
-                            .id("filesystem")
-                            .child(text(12., palette.ink3).child(filesystem))
-                            .tooltip(tip(mode)),
-                    ),
+                div()
+                    .h_full()
+                    .w(relative(share.clamp(0.01, 1.)))
+                    .rounded(px(BAR / 2.))
+                    .bg(if share > 0.9 {
+                        palette.danger
+                    } else {
+                        palette.ink3
+                    }),
             )
-            .child(
-                h_flex()
-                    .items_end()
-                    .gap(px(6.))
-                    .child(figure(volume.free, 22., 13., palette))
-                    .child(run(13., 22., palette.ink2, palette).child("可用")),
-            )
-            .child(
-                div().pt(px(6.)).child(
-                    div()
-                        .w_full()
-                        .h(px(6.))
-                        .rounded(px(3.))
-                        .bg(palette.hairline)
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(share.clamp(0.01, 1.)))
-                                .rounded(px(3.))
-                                .bg(if share > 0.9 {
-                                    palette.danger
-                                } else {
-                                    palette.ink2
-                                }),
-                        ),
+            .into_any_element();
+        tile(
+            IconName::HardDrive,
+            format!("磁盘 {}", volume.root.trim_end_matches(['\\', '/'])),
+            Some(tag),
+            h_flex()
+                .items_end()
+                .gap(px(6.))
+                .child(figure(volume.free, FIGURE, UNIT, palette))
+                .child(run(UNIT, FIGURE, palette.ink2, palette).child("可用")),
+            line(
+                format!(
+                    "已用 {}，共 {}",
+                    format::percent(used, volume.total),
+                    format::bytes(volume.total)
                 ),
-            )
-            .child(text(12., palette.ink3).child(format!(
-                "已用 {}，共 {}",
-                format::percent(used, volume.total),
-                format::bytes(volume.total)
-            )))
+                palette,
+            ),
+            Some(meter),
+            palette,
+        )
     }
 
     fn reclaim(&self, palette: &Palette, cx: &mut Context<Self>) -> Div {
         let cleanup: Cleanup = self.cleanup();
-        let block = v_flex()
-            .flex_none()
-            .w(px(196.))
-            .gap(px(6.))
-            .child(caption("可清理", palette));
         if cleanup.is_empty() {
-            return block.child(
+            return tile(
+                IconName::BrushCleaning,
+                "可清理",
+                None,
+                figure(0, FIGURE, UNIT, palette),
                 h_flex()
-                    .pt(px(4.))
                     .gap(px(6.))
-                    .child(glyph(IconName::CircleCheck, 14., palette.success))
-                    .child(text(13., palette.ink2).child("没有要清理的")),
+                    .child(glyph(IconName::CircleCheck, 13., palette.success))
+                    .child(line("没有要清理的", palette)),
+                None,
+                palette,
             );
         }
         let mut what = Vec::new();
@@ -619,23 +684,58 @@ impl MultiboxApp {
         if cleanup.stale > 0 {
             what.push(format!("{} 条失效记录", cleanup.stale));
         }
-        block
-            .child(figure(cleanup.bytes, 22., 13., palette))
-            .child(text(12., palette.ink3).child(what.join(" · ")))
+        tile(
+            IconName::BrushCleaning,
+            "可清理",
+            None,
+            figure(cleanup.bytes, FIGURE, UNIT, palette),
+            line(what.join(" · "), palette),
+            Some(
+                Button::new("clean-up")
+                    .small()
+                    .outline()
+                    .icon(IconName::BrushCleaning)
+                    .label("清理")
+                    .tooltip("先列出会清掉什么，确认后再动手")
+                    .loading(self.global_busy.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| this.confirm_cleanup(window, cx)))
+                    .into_any_element(),
+            ),
+            palette,
+        )
+    }
+
+    /// The title of the list, with the key to every bar in it and above it.
+    fn list_head(&self, snapshot: &Snapshot, palette: &Palette) -> Div {
+        let (_, on_disk) = self.totals(snapshot);
+        let kinds = parts(&on_disk, palette);
+        h_flex()
+            .flex_wrap()
+            .gap_x(px(16.))
+            .gap_y(px(6.))
+            .px(px(14.))
+            .pt(px(10.))
+            .pb(px(8.))
             .child(
-                h_flex().pt(px(6.)).child(
-                    Button::new("clean-up")
-                        .small()
-                        .primary()
-                        .icon(IconName::BrushCleaning)
-                        .label("清理")
-                        .tooltip("先列出会清掉什么，确认后再动手")
-                        .loading(self.global_busy.is_some())
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.confirm_cleanup(window, cx)),
-                        ),
-                ),
+                h_flex()
+                    .flex_1()
+                    .gap(px(8.))
+                    .child(caption("工作区", palette))
+                    .child(text(12., palette.ink3).child(snapshot.worktrees.len().to_string())),
             )
+            .child(h_flex().flex_wrap().gap_x(px(16.)).gap_y(px(4.)).children(
+                kinds.iter().filter(|part| part.bytes > 0).map(|part| {
+                    h_flex()
+                        .gap(px(6.))
+                        .child(swatch(part, palette))
+                        .child(text(12., palette.ink2).child(part.label))
+                        .child(
+                            text(12., palette.ink)
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(format::bytes(part.bytes)),
+                        )
+                }),
+            ))
     }
 
     // ---- the list ------------------------------------------------------
@@ -688,11 +788,16 @@ impl MultiboxApp {
         let bar: AnyElement = match (usage, self.scanning.get(&path)) {
             (Some(usage), _) => {
                 let total = usage.split.total();
+                let length = (total as f32 / largest.max(1) as f32).clamp(0.02, 1.);
                 div()
-                    .w(relative(
-                        (total as f32 / largest.max(1) as f32).clamp(0.02, 1.),
+                    .w(relative(length))
+                    .child(stack(
+                        "bar",
+                        &parts(&usage.split, palette),
+                        8.,
+                        ROW_SPAN * length,
+                        palette,
                     ))
-                    .child(stack("bar", &parts(&usage.split, palette), 8., palette))
                     .into_any_element()
             }
             (None, Some(progress)) => h_flex()
@@ -727,7 +832,7 @@ impl MultiboxApp {
             .gap(px(24.))
             .px(px(14.))
             .py(px(12.))
-            .rounded(px(10.))
+            .rounded(px(7.))
             .cursor_pointer()
             .map(|row| {
                 if selected {
@@ -1006,7 +1111,7 @@ impl MultiboxApp {
                                 .child(format!("{} 个文件", format::count(usage.files))),
                         ),
                 )
-                .child(stack("kinds", &kinds, 8., palette))
+                .child(stack("kinds", &kinds, 8., PANEL_SPAN, palette))
                 .child(
                     v_flex().pt(px(2.)).gap(px(7.)).children(
                         kinds
@@ -1093,6 +1198,7 @@ impl MultiboxApp {
                                                     ("entry", index),
                                                     &parts(&entry.split, palette),
                                                     6.,
+                                                    ENTRY_SPAN * share.min(1.),
                                                     palette,
                                                 ),
                                             ))
@@ -1324,28 +1430,14 @@ impl Render for MultiboxApp {
                             .overflow_y_scrollbar()
                             .child(
                                 v_flex()
-                                    .px(px(14.))
-                                    .pt(px(26.))
-                                    .pb(px(28.))
-                                    .gap(px(30.))
+                                    .p(px(24.))
+                                    .gap(px(16.))
+                                    .child(self.overview(&snapshot, &palette, cx))
                                     .child(
-                                        div()
-                                            .px(px(14.))
-                                            .child(self.overview(&snapshot, &palette, cx)),
-                                    )
-                                    .child(
-                                        v_flex()
+                                        card(&palette)
+                                            .p(px(6.))
                                             .gap(px(2.))
-                                            .child(
-                                                h_flex()
-                                                    .px(px(14.))
-                                                    .pb(px(8.))
-                                                    .gap(px(8.))
-                                                    .child(caption("工作区", &palette))
-                                                    .child(text(12., palette.ink3).child(
-                                                        snapshot.worktrees.len().to_string(),
-                                                    )),
-                                            )
+                                            .child(self.list_head(&snapshot, &palette))
                                             .children(self.adding(&palette))
                                             .children(rows),
                                     ),
