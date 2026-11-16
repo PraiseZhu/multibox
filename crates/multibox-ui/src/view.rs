@@ -68,8 +68,8 @@ pub struct MultiboxApp {
     scanning: HashMap<PathBuf, Arc<ScanProgress>>,
     scan_errors: HashMap<PathBuf, String>,
     trash_size: Option<u64>,
-    /// (bytes once hard-linked data is counted once, bytes that sharing saves)
-    dedup: (u64, u64),
+    /// What the measured worktrees take, hard-linked data counted once.
+    dedup: usage::Totals,
     selected: Option<PathBuf>,
     busy: HashMap<PathBuf, Busy>,
     global_busy: Option<SharedString>,
@@ -101,7 +101,7 @@ impl MultiboxApp {
             scanning: HashMap::new(),
             scan_errors: HashMap::new(),
             trash_size: None,
-            dedup: (0, 0),
+            dedup: usage::Totals::default(),
             selected: None,
             busy: HashMap::new(),
             global_busy: None,
@@ -296,7 +296,7 @@ impl MultiboxApp {
 
     fn recompute_totals(&mut self) {
         let Some(snapshot) = &self.snapshot else {
-            self.dedup = (0, 0);
+            self.dedup = usage::Totals::default();
             return;
         };
         let reports = snapshot
@@ -430,9 +430,21 @@ impl MultiboxApp {
             .map(|usage| usage.split.total() - usage.split.linked)
     }
 
+    /// On a cloning volume unchanged data may share blocks with other
+    /// worktrees, which the file system does not report: the size is a bound.
     fn freed_text(&self, path: &Path) -> String {
+        let bound = self
+            .details
+            .get(path)
+            .is_some_and(|details| details.reflink);
         self.freed(path)
-            .map(|bytes| format!("，释放 {}", format::bytes(bytes)))
+            .map(|bytes| {
+                format!(
+                    "，{}释放 {}",
+                    if bound { "最多" } else { "" },
+                    format::bytes(bytes)
+                )
+            })
             .unwrap_or_default()
     }
 

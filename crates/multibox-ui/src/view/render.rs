@@ -229,7 +229,15 @@ struct Part {
     bytes: u64,
 }
 
+/// What only this worktree holds, then what it shares with others. Every bar
+/// runs in this order, so the hollow part always ends it and what deleting the
+/// worktree would free is one unbroken stretch.
 fn parts(split: &Split, palette: &Palette) -> [Part; 4] {
+    let [source, cache, git] = own_parts(split, palette);
+    [source, cache, git, shared_part(split, palette)]
+}
+
+fn own_parts(split: &Split, palette: &Palette) -> [Part; 3] {
     [
         Part {
             label: "源码",
@@ -246,13 +254,6 @@ fn parts(split: &Split, palette: &Palette) -> [Part; 4] {
             bytes: split.untracked,
         },
         Part {
-            label: "共用缓存",
-            long: "和其他工作区共用，只存一份",
-            color: palette.shared,
-            ghost: true,
-            bytes: split.linked,
-        },
-        Part {
             label: "Git",
             long: "Git 数据",
             color: palette.git,
@@ -260,6 +261,59 @@ fn parts(split: &Split, palette: &Palette) -> [Part; 4] {
             bytes: split.git,
         },
     ]
+}
+
+fn shared_part(split: &Split, palette: &Palette) -> Part {
+    Part {
+        label: "共用缓存",
+        long: "共用的缓存（硬链接）",
+        color: palette.shared,
+        ghost: true,
+        bytes: split.linked,
+    }
+}
+
+/// "最多" before a size that can only be an upper bound: on a cloning volume
+/// unchanged data shares blocks the file system does not report.
+fn at_most(figure: Div, size: f32, largest: f32, bound: bool, palette: &Palette) -> Div {
+    h_flex()
+        .items_end()
+        .gap(px(size * 0.4))
+        .when(bound, |row| {
+            row.child(run(size, largest, palette.ink2, palette).child("最多"))
+        })
+        .child(figure)
+}
+
+/// Why a cloning volume's sizes are upper bounds, in a sentence that fits the
+/// whole repository, a worktree, or what deleting it would free.
+const CLONED_BLOCKS: &str = "这个卷上工作区之间还共用没改过的数据块，这部分无法统计";
+
+/// What a worktree's own size means, and what it leaves out.
+fn own_note(main: bool, own: u64, linked: u64, reflink: bool) -> String {
+    let mut note = if main {
+        format!("独占 {}：只属于这个工作区的空间。", format::bytes(own))
+    } else {
+        format!("独占 {}：删掉它能腾出这么多。", format::bytes(own))
+    };
+    if linked > 0 {
+        note += &format!(
+            "\n另有 {} 是共用的硬链接，磁盘上只存一份{}。",
+            format::bytes(linked),
+            if main {
+                ""
+            } else {
+                "，删掉它不会另外腾出"
+            }
+        );
+    }
+    if reflink {
+        note += &format!(
+            "\n{CLONED_BLOCKS}，实际{}的可能更少。",
+            if main { "独占" } else { "能腾出" }
+        );
+    }
+    note
 }
 
 fn swatch(part: &Part, palette: &Palette) -> Div {
@@ -274,8 +328,8 @@ fn swatch(part: &Part, palette: &Palette) -> Div {
 }
 
 /// A bar split by kind, with a gap between neighbours and rounded ends. Each
-/// part answers a hover with its name, size and share. `span` is about how
-/// many pixels the bar runs.
+/// part answers a hover with its name and size. `span` is about how many
+/// pixels the bar runs.
 fn stack(
     id: impl Into<ElementId>,
     parts: &[Part],
@@ -316,12 +370,7 @@ fn stack(
                 .when(place == last, |bar| bar.rounded_r(px(4.)))
                 .bg(part.color)
                 .when(part.ghost, |bar| bar.border_1().border_color(palette.cache))
-                .tooltip(tip(format!(
-                    "{} {} · {}",
-                    part.long,
-                    format::bytes(part.bytes),
-                    format::percent(part.bytes, total)
-                )))
+                .tooltip(tip(format!("{} {}", part.long, format::bytes(part.bytes))))
         }))
 }
 
@@ -577,9 +626,8 @@ impl MultiboxApp {
                 whole.git += usage.split.git;
             }
         }
-        let (_, saved) = self.dedup;
         let on_disk = Split {
-            linked: whole.linked.saturating_sub(saved),
+            linked: whole.linked.saturating_sub(self.dedup.repeated),
             ..whole
         };
         (whole, on_disk)
@@ -587,10 +635,11 @@ impl MultiboxApp {
 
     /// What Multibox has saved across the linked worktrees.
     fn saving(&self, snapshot: &Snapshot) -> Saving {
-        // On NTFS, what the hard links share now; a cloning volume says
-        // nothing of the kind, so there the records kept at creation count.
+        // On NTFS, what the worktrees share through hard links now; a cloning
+        // volume says nothing of the kind, so there the records kept at
+        // creation count.
         let mut saving = Saving {
-            bytes: self.dedup.1,
+            bytes: self.dedup.between,
             ..Saving::default()
         };
         for worktree in snapshot.worktrees.iter().filter(|w| !w.is_main && w.exists) {
@@ -631,7 +680,7 @@ impl MultiboxApp {
             self.occupied(snapshot, reflink, palette),
             self.saved_space(&saving, palette),
             self.saved_work(&saving, palette),
-            self.reclaim(palette, cx),
+            self.reclaim(reflink, palette, cx),
         ];
         let row = || h_flex().items_stretch().gap(px(16.));
         if wide {
@@ -653,7 +702,7 @@ impl MultiboxApp {
             .filter(|w| self.usage.contains_key(&w.path))
             .count();
         let (whole, on_disk) = self.totals(snapshot);
-        let (actual, _) = self.dedup;
+        let actual = self.dedup.on_disk;
 
         let sentence: AnyElement = if measured < present {
             h_flex()
@@ -669,7 +718,7 @@ impl MultiboxApp {
         };
         let explain = if reflink {
             format!(
-                "各工作区的文件合计 {}。这个卷上没改过的文件和源工作区共用数据，实际占用比这里小。",
+                "各工作区的文件合计 {}，共用的缓存只算一次。\n{CLONED_BLOCKS}，实际占用可能更少。",
                 format::bytes(whole.total())
             )
         } else {
@@ -682,7 +731,13 @@ impl MultiboxApp {
             IconName::Layers,
             "占用磁盘",
             Some(info("usage-info", explain, palette)),
-            figure(actual, FIGURE, UNIT, palette),
+            at_most(
+                figure(actual, FIGURE, UNIT, palette),
+                UNIT,
+                FIGURE,
+                reflink,
+                palette,
+            ),
             sentence,
             Some(
                 stack("whole", &parts(&on_disk, palette), BAR, TILE_SPAN, palette)
@@ -693,7 +748,7 @@ impl MultiboxApp {
     }
 
     fn saved_space(&self, saving: &Saving, palette: &Palette) -> Div {
-        let (actual, _) = self.dedup;
+        let actual = self.dedup.on_disk;
         let sentence = if saving.bytes > 0 {
             line(
                 format!(
@@ -709,8 +764,8 @@ impl MultiboxApp {
         };
         let compare = [
             Part {
-                label: "实际占用",
-                long: "现在实际占用",
+                label: "占用磁盘",
+                long: "现在占用磁盘",
                 color: palette.cache,
                 ghost: false,
                 bytes: actual,
@@ -834,7 +889,7 @@ impl MultiboxApp {
         )
     }
 
-    fn reclaim(&self, palette: &Palette, cx: &mut Context<Self>) -> Div {
+    fn reclaim(&self, reflink: bool, palette: &Palette, cx: &mut Context<Self>) -> Div {
         let cleanup: Cleanup = self.cleanup();
         if cleanup.is_empty() {
             return tile(
@@ -863,8 +918,20 @@ impl MultiboxApp {
         tile(
             IconName::BrushCleaning,
             "可清理",
-            None,
-            figure(cleanup.bytes, FIGURE, UNIT, palette),
+            reflink.then(|| {
+                info(
+                    "reclaim-info",
+                    format!("{CLONED_BLOCKS}，实际能腾出的可能更少。"),
+                    palette,
+                )
+            }),
+            at_most(
+                figure(cleanup.bytes, FIGURE, UNIT, palette),
+                UNIT,
+                FIGURE,
+                reflink,
+                palette,
+            ),
             line(what.join(" · "), palette),
             Some(
                 Button::new("clean-up")
@@ -999,22 +1066,20 @@ impl MultiboxApp {
         let size: AnyElement = match usage {
             Some(usage) => {
                 let linked = usage.split.linked;
+                let own = usage.split.total() - linked;
+                let reflink = details.is_some_and(|details| details.reflink);
                 v_flex()
                     .id("size")
                     .items_end()
                     .gap(px(3.))
-                    .child(figure(usage.split.total() - linked, 14., 12., palette))
+                    .child(figure(own, 14., 12., palette))
                     .when(linked > 0, |column| {
                         column.child(
                             text(11., palette.ink3)
-                                .child(format!("共用 {}", format::bytes(linked))),
+                                .child(format!("+{} 共用", format::bytes(linked))),
                         )
                     })
-                    .tooltip(tip(if linked > 0 {
-                        "实际占用：删掉它能腾出这么多。共用的部分磁盘上只存一份，删掉它也不会腾出来。"
-                    } else {
-                        "实际占用：删掉它能腾出这么多。"
-                    }))
+                    .tooltip(tip(own_note(worktree.is_main, own, linked, reflink)))
                     .into_any_element()
             }
             None => text(14., palette.ink3).child("—").into_any_element(),
@@ -1099,7 +1164,7 @@ impl MultiboxApp {
     // ---- inspector -----------------------------------------------------
 
     /// What making this worktree saved, from the record Multibox kept.
-    fn worktree_saving(&self, details: Option<&Details>, split: &Split, palette: &Palette) -> Div {
+    fn worktree_saving(&self, details: Option<&Details>, shared: u64, palette: &Palette) -> Div {
         let section = v_flex()
             .gap(px(10.))
             .child(caption("这个工作区省下", palette));
@@ -1112,12 +1177,12 @@ impl MultiboxApp {
                     .child("这个工作区不是用这一版 Multibox 建的，没有记下省了什么。"),
             );
         };
-        // On NTFS what it shares now; on a cloning volume what it was spared
-        // writing when it was made.
+        // On NTFS what it shares now, each piece once; on a cloning volume
+        // what it was spared writing when it was made.
         let space = if record.reflink {
             record.saved_bytes()
         } else {
-            split.linked
+            shared
         };
         let seconds =
             record.assets as f64 * SECONDS_PER_ASSET + record.crates as f64 * SECONDS_PER_CRATE;
@@ -1364,68 +1429,150 @@ impl MultiboxApp {
         if let Some(usage) = usage {
             let split = usage.split;
             let total = split.total();
-            let kinds = parts(&split, palette);
+            let shared = split.linked;
+            let own = total - shared;
+            let reflink = details.is_some_and(|details| details.reflink);
+            let mine = own_parts(&split, palette);
+            let theirs = shared_part(&split, palette);
+
+            // Own, shared and the sum, the one relation every number here
+            // keeps: the figure is what is the worktree's alone, the bar runs
+            // the whole size with the shared part hollow at its end, and a
+            // bracket under each half names it.
+            let bar: AnyElement = if shared > 0 {
+                let half = |id: &'static str, kinds: &[Part], bytes: u64| {
+                    let share = bytes as f32 / total as f32;
+                    v_flex()
+                        .flex_grow(share)
+                        .flex_shrink(1.)
+                        .flex_basis(px(0.))
+                        .min_w(px(6.))
+                        .gap(px(4.))
+                        .child(stack(
+                            id,
+                            kinds,
+                            8.,
+                            (PANEL_SPAN * share).max(NARROWEST),
+                            palette,
+                        ))
+                        .child(
+                            div()
+                                .h(px(5.))
+                                .border_l_1()
+                                .border_r_1()
+                                .border_b_1()
+                                .border_color(palette.ink3),
+                        )
+                };
+                v_flex()
+                    .gap(px(4.))
+                    .child(
+                        h_flex()
+                            .gap(px(2.))
+                            .child(half("own", &mine, own))
+                            .child(half("shared", std::slice::from_ref(&theirs), shared)),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .gap(px(12.))
+                            .child(
+                                text(12., palette.ink2)
+                                    .child(format!("独占 {}", format::bytes(own))),
+                            )
+                            .child(
+                                text(12., palette.ink3)
+                                    .child(format!("共用 {}", format::bytes(shared))),
+                            ),
+                    )
+                    .into_any_element()
+            } else {
+                stack("kinds", &parts(&split, palette), 8., PANEL_SPAN, palette).into_any_element()
+            };
+
+            let entry = |part: &Part, value: Hsla| {
+                h_flex()
+                    .gap(px(8.))
+                    .child(swatch(part, palette))
+                    .child(text(13., palette.ink2).flex_1().child(part.long))
+                    .child(
+                        text(13., value)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(format::bytes(part.bytes)),
+                    )
+            };
+            let rule = || div().h(px(1.)).bg(palette.hairline);
+            let mut table = v_flex().pt(px(2.)).gap(px(7.)).children(
+                mine.iter()
+                    .filter(|part| {
+                        part.bytes > 0 && (part.label != "Git" || part.bytes >= GIT_WORTH_SHOWING)
+                    })
+                    .map(|part| entry(part, palette.ink)),
+            );
+            if shared > 0 {
+                table = table
+                    .child(rule())
+                    .child(
+                        v_flex()
+                            .gap(px(3.))
+                            .child(entry(&theirs, palette.ink2))
+                            .child(text(12., palette.ink3).pl(px(16.)).child(
+                                if worktree.is_main {
+                                    "数据还有别的硬链接，磁盘上只存一份"
+                                } else {
+                                    "数据还有别的硬链接，只存一份，删掉它不会腾出"
+                                },
+                            )),
+                    )
+                    .child(rule())
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(text(13., palette.ink3).flex_1().child("文件合计"))
+                            .child(text(13., palette.ink3).child(format::bytes(total))),
+                    );
+            }
+
             let mut section = v_flex()
                 .gap(px(10.))
-                .child(caption("实际占用", palette))
+                .child(h_flex().gap(px(6.)).child(caption("独占", palette)).child(
+                    text(12., palette.ink3).child(if worktree.is_main {
+                        "· 只属于这个工作区的空间"
+                    } else {
+                        "· 删掉它能腾出的空间"
+                    }),
+                ))
                 .child(
                     h_flex()
                         .items_end()
                         .justify_between()
-                        .child(figure(total - split.linked, 26., 14., palette))
+                        .child(at_most(
+                            figure(own, 26., 14., palette),
+                            14.,
+                            26.,
+                            reflink,
+                            palette,
+                        ))
                         .child(
                             run(12., 26., palette.ink3, palette)
                                 .child(format!("{} 个文件", format::count(usage.files))),
                         ),
                 )
-                .child(stack("kinds", &kinds, 8., PANEL_SPAN, palette))
-                .child(
-                    v_flex().pt(px(2.)).gap(px(7.)).children(
-                        kinds
-                            .iter()
-                            .filter(|part| {
-                                part.bytes > 0
-                                    && (part.label != "Git" || part.bytes >= GIT_WORTH_SHOWING)
-                            })
-                            .map(|part| {
-                                h_flex()
-                                    .gap(px(8.))
-                                    .child(swatch(part, palette))
-                                    .child(text(13., palette.ink2).flex_1().child(part.long))
-                                    .child(
-                                        text(13., palette.ink)
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(format::bytes(part.bytes)),
-                                    )
-                                    .child(
-                                        text(12., palette.ink3)
-                                            .w(px(36.))
-                                            .text_right()
-                                            .child(format::percent(part.bytes, total)),
-                                    )
-                            }),
-                    ),
-                );
-            if split.linked > 0 {
+                .child(bar)
+                .child(table);
+            if reflink {
                 section = section.child(text(12., palette.ink3).child(format!(
-                    "另有 {} 和其他工作区共用，磁盘上只存一份{}",
-                    format::bytes(split.linked),
+                    "{CLONED_BLOCKS}，实际{}的可能更少。",
                     if worktree.is_main {
-                        ""
+                        "独占"
                     } else {
-                        "，删掉它也不会腾出来"
+                        "能腾出"
                     }
                 )));
             }
-            if details.is_some_and(|details| details.reflink) {
-                section = section.child(
-                    text(12., palette.ink3)
-                        .child("这个卷上没改过的文件和源工作区共用数据，实际占用比这里小。"),
-                );
-            }
             body = body.child(section);
             if !worktree.is_main {
-                body = body.child(self.worktree_saving(details, &split, palette));
+                body = body.child(self.worktree_saving(details, usage.shared, palette));
             }
 
             // The same three columns as the list of worktrees: name, a bar on

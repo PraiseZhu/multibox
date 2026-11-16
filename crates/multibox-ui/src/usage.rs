@@ -2,8 +2,12 @@
 //!
 //! Every file is put in one of four groups: tracked by git, not tracked (the
 //! engine caches Multibox carries and whatever else is ignored), hard-linked
-//! (files sharing their data with another path, which is how Multibox shares
-//! write-once caches on NTFS) and, for the main worktree, the git database.
+//! (names whose data is counted elsewhere: shared with another path outside
+//! the worktree, which is how Multibox shares write-once caches on NTFS, or a
+//! second name of data the worktree already holds, as Cargo makes in
+//! `target/`) and, for the main worktree, the git database. Data whose every
+//! name is inside the worktree is the worktree's own: one name carries it as
+//! tracked or not, the others are hard-linked.
 //!
 //! Hard-linked files are also reported by identity, so the window can count
 //! data shared between worktrees once. Reflinked data (Dev Drive, APFS) cannot
@@ -80,7 +84,11 @@ pub struct Usage {
     pub split: Split,
     /// Largest first.
     pub entries: Vec<Entry>,
+    /// Every name of hard-linked data found, own or shared.
     pub linked: Vec<LinkedFile>,
+    /// Data shared with paths outside the worktree, each piece once: what the
+    /// worktree would take more if it held a copy of its own.
+    pub shared: u64,
     /// Entries that could not be read.
     pub skipped: u64,
     pub elapsed: Duration,
@@ -146,7 +154,18 @@ struct Found {
     files: u64,
     skipped: u64,
     top: HashMap<String, (bool, Split)>,
-    linked: Vec<LinkedFile>,
+    names: Vec<Name>,
+}
+
+/// One name of hard-linked data, as the walk found it.
+struct Name {
+    file: LinkedFile,
+    /// How many names the data has, here and elsewhere.
+    links: u64,
+    /// The entry at the top of the worktree it is under.
+    top: String,
+    /// What it would count as, were it not linked.
+    kind: Kind,
 }
 
 struct LinkInfo {
@@ -252,6 +271,10 @@ fn walk_dir(root: &Path, rel: &str, request: &ScanRequest<'_>, found: &mut Found
         let mut size = meta.len();
         let (top, rest) = child.split_once('/').unwrap_or((child.as_str(), ""));
         let in_git = top == ".git";
+        let unlinked = || match &request.tracked {
+            Some(tracked) if tracked.contains(&child) => Kind::Tracked,
+            _ => Kind::Untracked,
+        };
         let mut file_kind = None;
         if in_git {
             file_kind = Some(Kind::Git);
@@ -261,18 +284,20 @@ fn walk_dir(root: &Path, rel: &str, request: &ScanRequest<'_>, found: &mut Found
         {
             size = info.size;
             if info.links > 1 {
-                found.linked.push(LinkedFile {
-                    volume: info.volume,
-                    id: info.id,
-                    size,
+                found.names.push(Name {
+                    file: LinkedFile {
+                        volume: info.volume,
+                        id: info.id,
+                        size,
+                    },
+                    links: info.links,
+                    top: top.to_owned(),
+                    kind: unlinked(),
                 });
                 file_kind = Some(Kind::Linked);
             }
         }
-        let file_kind = file_kind.unwrap_or_else(|| match &request.tracked {
-            Some(tracked) if tracked.contains(&child) => Kind::Tracked,
-            _ => Kind::Untracked,
-        });
+        let file_kind = file_kind.unwrap_or_else(unlinked);
 
         found
             .top
@@ -326,16 +351,43 @@ pub fn scan(request: &ScanRequest<'_>) -> std::io::Result<Usage> {
 
     let mut usage = Usage::default();
     let mut top: HashMap<String, (bool, Split)> = HashMap::new();
+    let mut names = Vec::new();
     for found in results {
         usage.files += found.files;
         usage.skipped += found.skipped;
-        usage.linked.extend(found.linked);
+        names.extend(found.names);
         for (name, (dir, split)) in found.top {
             let slot = top.entry(name).or_insert((dir, Split::default()));
             slot.0 |= dir;
             slot.1.merge(&split);
         }
     }
+
+    // Data with every name in here is the worktree's own, and deleting it
+    // frees it: one name carries it as what it would be unlinked. Data with a
+    // name outside is shared, and counted once towards what sharing spares.
+    let mut found_here: HashMap<(u64, u64), u64> = HashMap::new();
+    for name in &names {
+        *found_here
+            .entry((name.file.volume, name.file.id))
+            .or_default() += 1;
+    }
+    let mut counted = HashSet::new();
+    for name in &names {
+        let key = (name.file.volume, name.file.id);
+        if !counted.insert(key) {
+            continue;
+        }
+        if found_here[&key] >= name.links {
+            if let Some((_, split)) = top.get_mut(&name.top) {
+                split.linked -= name.file.size;
+                split.add(name.kind, name.file.size);
+            }
+        } else {
+            usage.shared += name.file.size;
+        }
+    }
+    usage.linked = names.into_iter().map(|name| name.file).collect();
     usage.entries = top
         .into_iter()
         .map(|(name, (dir, split))| {
@@ -366,24 +418,51 @@ pub fn tree_size(path: &Path) -> u64 {
     scan(&request).map_or(0, |usage| usage.split.total())
 }
 
-/// Bytes the given worktrees take once data shared through hard links is
-/// counted once, and the bytes that sharing saves.
-pub fn deduplicated<'a>(reports: impl IntoIterator<Item = &'a Usage>) -> (u64, u64) {
+/// What a set of worktrees takes, with hard-linked data counted once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Totals {
+    /// What they take on disk.
+    pub on_disk: u64,
+    /// Bytes that adding up file sizes counts more than once, because the
+    /// same data has several names.
+    pub repeated: u64,
+    /// The part of that spared by worktrees sharing data: what each would
+    /// take more with a copy of its own. Names Cargo makes inside one
+    /// worktree's `target/` are not counted.
+    pub between: u64,
+}
+
+/// What the given worktrees take, one report per worktree.
+pub fn deduplicated<'a>(reports: impl IntoIterator<Item = &'a Usage>) -> Totals {
     let mut logical = 0u64;
     let mut linked_logical = 0u64;
-    let mut seen: HashSet<(u64, u64)> = HashSet::new();
-    let mut linked_unique = 0u64;
-    for usage in reports {
+    // Per piece of data: its size, in how many worktrees it was found, and
+    // the last of them.
+    let mut seen: HashMap<(u64, u64), (u64, u64, usize)> = HashMap::new();
+    for (worktree, usage) in reports.into_iter().enumerate() {
         logical += usage.split.total();
         for file in &usage.linked {
             linked_logical += file.size;
-            if seen.insert((file.volume, file.id)) {
-                linked_unique += file.size;
+            let slot = seen
+                .entry((file.volume, file.id))
+                .or_insert((file.size, 0, usize::MAX));
+            if slot.2 != worktree {
+                slot.1 += 1;
+                slot.2 = worktree;
             }
         }
     }
-    let saved = linked_logical - linked_unique;
-    (logical - saved, saved)
+    let linked_unique: u64 = seen.values().map(|(size, _, _)| size).sum();
+    let between = seen
+        .values()
+        .map(|(size, worktrees, _)| size * (worktrees - 1))
+        .sum();
+    let repeated = linked_logical - linked_unique;
+    Totals {
+        on_disk: logical - repeated,
+        repeated,
+        between,
+    }
 }
 
 #[cfg(test)]
@@ -437,9 +516,66 @@ mod tests {
             progress: &progress,
         })
         .unwrap();
+        assert_eq!(usage_a.shared, 5000);
         assert_eq!(usage_b.split.linked, 5000);
-        let (actual, saved) = deduplicated([&usage_a, &usage_b]);
-        assert_eq!(saved, 5000);
-        assert_eq!(actual, 100 + 1000 + 5000 + 10);
+        let totals = deduplicated([&usage_a, &usage_b]);
+        assert_eq!(totals.repeated, 5000);
+        assert_eq!(totals.between, 5000);
+        assert_eq!(totals.on_disk, 100 + 1000 + 5000 + 10);
+    }
+
+    /// Cargo gives a build output a second name in the same `target/`: that
+    /// data is the worktree's own until another worktree links to it too.
+    #[test]
+    fn data_named_twice_inside_one_worktree_is_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = dir.path().join("c");
+        let d = dir.path().join("d");
+        write(&c.join("target/debug/deps/tool-1234.exe"), 1000);
+        fs::hard_link(
+            c.join("target/debug/deps/tool-1234.exe"),
+            c.join("target/debug/tool.exe"),
+        )
+        .unwrap();
+        let progress = ScanProgress::default();
+        let measure = |root: &Path| {
+            scan(&ScanRequest {
+                root,
+                skip: HashSet::new(),
+                tracked: None,
+                links: true,
+                progress: &progress,
+            })
+            .unwrap()
+        };
+
+        let alone = measure(&c);
+        assert_eq!(alone.split.untracked, 1000);
+        assert_eq!(alone.split.linked, 1000);
+        assert_eq!(alone.shared, 0);
+        assert_eq!(alone.entries[0].split.untracked, 1000);
+        let totals = deduplicated([&alone]);
+        assert_eq!(totals.on_disk, 1000);
+        assert_eq!(totals.repeated, 1000);
+        assert_eq!(totals.between, 0);
+
+        // Carried into another worktree, it is shared, and spared once.
+        write(&d.join("readme.md"), 10);
+        fs::create_dir_all(d.join("target/debug")).unwrap();
+        fs::hard_link(
+            c.join("target/debug/tool.exe"),
+            d.join("target/debug/tool.exe"),
+        )
+        .unwrap();
+        let (c, d) = (measure(&c), measure(&d));
+        assert_eq!(c.split.untracked, 0);
+        assert_eq!(c.split.linked, 2000);
+        assert_eq!(c.shared, 1000);
+        assert_eq!(d.split.linked, 1000);
+        assert_eq!(d.shared, 1000);
+        let totals = deduplicated([&c, &d]);
+        assert_eq!(totals.on_disk, 1000 + 10);
+        assert_eq!(totals.repeated, 2000);
+        assert_eq!(totals.between, 1000);
     }
 }
