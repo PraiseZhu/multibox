@@ -43,7 +43,26 @@ const ENTRY_SPAN: f32 = 96.;
 
 fn tip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let text: SharedString = text.into();
-    move |window, cx| Tooltip::new(text.clone()).build(window, cx)
+    move |window, cx| {
+        let text = text.clone();
+        Tooltip::element(move |_, _| {
+            // Constrain the content itself so long explanations wrap inside
+            // the tooltip's flex row. Newlines separate short paragraphs.
+            v_flex()
+                .max_w(px(320.))
+                .gap(px(8.))
+                .text_size(px(13.))
+                .line_height(px(20.))
+                .whitespace_normal()
+                .children(
+                    text.split('\n')
+                        .map(|paragraph| div().child(paragraph.to_owned())),
+                )
+        })
+        .px(px(12.))
+        .py(px(8.))
+        .build(window, cx)
+    }
 }
 
 fn glyph(name: IconName, size: f32, color: Hsla) -> Icon {
@@ -709,7 +728,7 @@ impl MultiboxApp {
             "省下的空间",
             Some(info(
                 "saved-space-info",
-                "NTFS 上，几个工作区共用的缓存（硬链接）在磁盘上只存一份，这里是此刻因此省下的。Dev Drive 和 macOS 上，新工作区和源工作区共用没改过的数据，这里是创建时少写的部分。",
+                "NTFS：多个工作区共用的缓存只存一份，显示当前节省的空间。\nDev Drive / macOS：显示创建工作区时因共用数据节省的空间，不反映后续改动。",
                 palette,
             )),
             figure(saving.bytes, FIGURE, UNIT, palette),
@@ -753,7 +772,7 @@ impl MultiboxApp {
             "省下的工作",
             Some(info(
                 "saved-work-info",
-                "数量是精确的：创建工作区时记下带过去了多少编译好的依赖包、多少资源的导入结果；以前的版本建的工作区没有这份记录。时间是估算，按 docs/benchmarks.md 里一台 32 线程 Windows 工作站的速度：Unity 每个资源约 16 毫秒，Rust 每个依赖包约 0.15 秒。换一台机器或工程，实际可能快或慢好几倍。",
+                "数量：创建工作区时复用的编译或资源导入结果，按创建记录统计。旧版本创建的工作区没有记录。\n时间：按基准测试估算，Unity 每个资源约 16 毫秒，Rust 每个依赖包约 0.15 秒。实际耗时因机器和工程而异。",
                 palette,
             )),
             h_flex()
