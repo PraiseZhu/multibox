@@ -14,10 +14,10 @@
 mod format;
 mod model;
 mod ops;
+mod theme;
 mod usage;
 mod view;
 
-use gpui_kit::component::Theme;
 use gpui_kit::{
     App, AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
@@ -72,7 +72,7 @@ fn main() {
                 ..Default::default()
             };
             let opened = gpui_kit::open_window(options, cx, move |window, cx| {
-                Theme::sync_system_appearance(Some(window), cx);
+                theme::install(window, cx);
                 cx.new(|cx| view::MultiboxApp::new(repo, window, cx))
             });
             if let Err(err) = opened {

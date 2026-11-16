@@ -66,14 +66,12 @@ pub struct LinkedFile {
     pub size: u64,
 }
 
-/// One entry at the top of the worktree, with its largest children.
+/// One entry at the top of the worktree.
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub name: String,
     pub dir: bool,
-    pub files: u64,
     pub split: Split,
-    pub children: Vec<(String, u64)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -147,8 +145,7 @@ impl Queue {
 struct Found {
     files: u64,
     skipped: u64,
-    top: HashMap<String, (bool, u64, Split)>,
-    second: HashMap<String, u64>,
+    top: HashMap<String, (bool, Split)>,
     linked: Vec<LinkedFile>,
 }
 
@@ -246,7 +243,7 @@ fn walk_dir(root: &Path, rel: &str, request: &ScanRequest<'_>, found: &mut Found
                 found
                     .top
                     .entry(child.clone())
-                    .or_insert((true, 0, Split::default()));
+                    .or_insert((true, Split::default()));
             }
             more.push(child);
             continue;
@@ -277,17 +274,12 @@ fn walk_dir(root: &Path, rel: &str, request: &ScanRequest<'_>, found: &mut Found
             _ => Kind::Untracked,
         });
 
-        let slot =
-            found
-                .top
-                .entry(top.to_owned())
-                .or_insert((!rest.is_empty(), 0, Split::default()));
-        slot.1 += 1;
-        slot.2.add(file_kind, size);
-        if !rest.is_empty() {
-            let second = rest.split('/').next().unwrap_or(rest);
-            *found.second.entry(format!("{top}/{second}")).or_default() += size;
-        }
+        found
+            .top
+            .entry(top.to_owned())
+            .or_insert((!rest.is_empty(), Split::default()))
+            .1
+            .add(file_kind, size);
         files += 1;
         bytes += size;
     }
@@ -333,45 +325,22 @@ pub fn scan(request: &ScanRequest<'_>) -> std::io::Result<Usage> {
     });
 
     let mut usage = Usage::default();
-    let mut top: HashMap<String, (bool, u64, Split)> = HashMap::new();
-    let mut second: HashMap<String, u64> = HashMap::new();
+    let mut top: HashMap<String, (bool, Split)> = HashMap::new();
     for found in results {
         usage.files += found.files;
         usage.skipped += found.skipped;
         usage.linked.extend(found.linked);
-        for (name, (dir, files, split)) in found.top {
-            let slot = top.entry(name).or_insert((dir, 0, Split::default()));
+        for (name, (dir, split)) in found.top {
+            let slot = top.entry(name).or_insert((dir, Split::default()));
             slot.0 |= dir;
-            slot.1 += files;
-            slot.2.merge(&split);
-        }
-        for (path, bytes) in found.second {
-            *second.entry(path).or_default() += bytes;
-        }
-    }
-    let mut children: HashMap<String, Vec<(String, u64)>> = HashMap::new();
-    for (path, bytes) in second {
-        if let Some((parent, child)) = path.split_once('/') {
-            children
-                .entry(parent.to_owned())
-                .or_default()
-                .push((child.to_owned(), bytes));
+            slot.1.merge(&split);
         }
     }
     usage.entries = top
         .into_iter()
-        .map(|(name, (dir, files, split))| {
-            let mut kids = children.remove(&name).unwrap_or_default();
-            kids.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            kids.truncate(6);
+        .map(|(name, (dir, split))| {
             usage.split.merge(&split);
-            Entry {
-                name,
-                dir,
-                files,
-                split,
-                children: kids,
-            }
+            Entry { name, dir, split }
         })
         .collect();
     usage.entries.sort_unstable_by(|a, b| {
@@ -458,10 +427,7 @@ mod tests {
         assert_eq!(usage_a.split.untracked, 1000);
         assert_eq!(usage_a.split.linked, 5000);
         assert_eq!(usage_a.entries[0].name, "Library");
-        assert_eq!(
-            usage_a.entries[0].children[0],
-            ("Artifacts".to_owned(), 5000)
-        );
+        assert_eq!(usage_a.entries[0].split.linked, 5000);
 
         let usage_b = scan(&ScanRequest {
             root: &b,

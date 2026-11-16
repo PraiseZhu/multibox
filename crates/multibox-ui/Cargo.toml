@@ -18,6 +18,7 @@ multibox-clone.workspace = true
 multibox-core.workspace = true
 # GPUI (Zed's UI framework) with the GPUI Kit components, pinned together.
 gpui-kit = "0.9.1"
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_Time"] }

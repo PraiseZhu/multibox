@@ -118,10 +118,13 @@ the background. Use `--wait` to stay in the foreground.
 `ui` opens a window on the repository and returns the terminal at once. It lists
 every worktree with the disk it takes, split into tracked files, caches, data
 shared through hard links and the git database, and offers the commands above
-as buttons: new worktree, finish, remove, lock, `prune`, and a cleanup of every
-worktree whose branch is already merged. Each removal asks first. The window is
-`multibox-ui`, shipped in the same archive and installed beside `git-multibox`;
-[its README](../crates/multibox-ui/README.md) describes what it shows.
+as buttons: new worktree, finish, remove, lock, and one cleanup of everything
+that can go without losing anything: worktrees whose branch is already merged,
+what an interrupted removal left behind, and records of worktrees whose
+directory is gone. Each removal says what it will delete and asks first. The
+window is `multibox-ui`, shipped in the same archive and installed beside
+`git-multibox`; [its README](../crates/multibox-ui/README.md) describes what it
+shows.
 
 ## Bringing work back
 
