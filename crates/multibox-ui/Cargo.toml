@@ -1,0 +1,29 @@
+[package]
+name = "multibox-ui"
+description = "A window onto a repository's worktrees: what each one takes on disk, and buttons to clean them up"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+# GPUI needs a newer compiler than the command-line tool's rust-version.
+rust-version = "1.88"
+
+[[bin]]
+name = "multibox-ui"
+path = "src/main.rs"
+
+[dependencies]
+multibox-clone.workspace = true
+multibox-core.workspace = true
+# GPUI (Zed's UI framework) with the GPUI Kit components, pinned together.
+gpui-kit = "0.9.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/multibox-clone", "crates/multibox-core", "crates/git-multibox"]
+members = [
+  "crates/multibox-clone",
+  "crates/multibox-core",
+  "crates/git-multibox",
+  "crates/multibox-ui",
+]
 
 [workspace.package]
 version = "0.1.3"
