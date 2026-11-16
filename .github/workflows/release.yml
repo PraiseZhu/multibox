@@ -56,6 +56,8 @@ jobs:
         with:
           name: windows
           path: dist/*.zip
+          # Only the publish job below needs it; the release keeps the archives.
+          retention-days: 1
 
   macos:
     runs-on: [self-hosted, macOS, ARM64]
@@ -86,6 +88,8 @@ jobs:
         with:
           name: macos
           path: dist/*.tar.gz
+          # Only the publish job below needs it; the release keeps the archives.
+          retention-days: 1
 
   publish:
     needs: [windows, macos]
