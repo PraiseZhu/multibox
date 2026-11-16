@@ -89,6 +89,7 @@ git multibox finish [--keep-branch] <worktree> [-- <merge options>]
 git multibox init [--project <path>] [--to <path>] [--exclude <path>]...
 git multibox doctor
 git multibox env
+git multibox ui [<path>]
 ```
 
 `init` is built from two commands that can also be run alone, for scripted setups:
@@ -113,6 +114,14 @@ switches a project.
 `remove` has the same safety rules as `git worktree remove`, refuses while an
 editor has the project open, and returns immediately: the deletion continues in
 the background. Use `--wait` to stay in the foreground.
+
+`ui` opens a window on the repository and returns the terminal at once. It lists
+every worktree with the disk it takes, split into tracked files, caches, data
+shared through hard links and the git database, and offers the commands above
+as buttons: new worktree, finish, remove, lock, `prune`, and a cleanup of every
+worktree whose branch is already merged. Each removal asks first. The window is
+`multibox-ui`, shipped in the same archive and installed beside `git-multibox`;
+[its README](../crates/multibox-ui/README.md) describes what it shows.
 
 ## Bringing work back
 

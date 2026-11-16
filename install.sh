@@ -1,9 +1,9 @@
 #!/bin/sh
-# Installs git-multibox on macOS:
+# Installs git-multibox and its window, multibox-ui, on macOS:
 #
 #   curl -fsSL https://raw.githubusercontent.com/fpgames/multibox/main/install.sh | sh
 #
-# It downloads the latest release, checks it against SHA256SUMS and puts it in
+# It downloads the latest release, checks it against SHA256SUMS and puts both in
 # ~/.local/bin. MULTIBOX_VERSION picks another release, such as v0.1.1, and
 # MULTIBOX_INSTALL_DIR another directory.
 set -eu
@@ -14,7 +14,7 @@ case "$(uname -s)-$(uname -m)" in
     Darwin-x86_64) target=x86_64-apple-darwin ;;
     *)
         echo "There is no prebuilt git-multibox for $(uname -s) $(uname -m) yet. With Rust installed:" >&2
-        echo "  cargo install --locked --git https://github.com/$repo git-multibox" >&2
+        echo "  cargo install --locked --git https://github.com/$repo git-multibox multibox-ui" >&2
         exit 1
         ;;
 esac
@@ -46,6 +46,10 @@ fi
 tar -xzf "$temp/$name.tar.gz" -C "$temp"
 mkdir -p "$dir"
 install -m 755 "$temp/$name/git-multibox" "$dir/git-multibox"
+# Releases from before the window shipped hold only the command-line tool.
+if [ -f "$temp/$name/multibox-ui" ]; then
+    install -m 755 "$temp/$name/multibox-ui" "$dir/multibox-ui"
+fi
 
 echo "Installed $("$dir/git-multibox" --version) in $dir"
 case ":$PATH:" in
@@ -60,3 +64,6 @@ if [ -n "$found" ] && [ "$found" != "$dir/git-multibox" ]; then
     echo "Note: $found comes first on PATH, so git will run that one instead."
 fi
 echo "Next, inside a repository: git multibox doctor"
+if [ -x "$dir/multibox-ui" ]; then
+    echo "To see every worktree and clean them up in a window: git multibox ui"
+fi

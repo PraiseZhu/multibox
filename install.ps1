@@ -1,8 +1,8 @@
-# Installs git-multibox on Windows, from PowerShell:
+# Installs git-multibox and its window, multibox-ui, on Windows, from PowerShell:
 #
 #   irm https://raw.githubusercontent.com/fpgames/multibox/main/install.ps1 | iex
 #
-# It downloads the latest release, checks it against SHA256SUMS, puts it in
+# It downloads the latest release, checks it against SHA256SUMS, puts both in
 # %LOCALAPPDATA%\Programs\multibox and adds that directory to your PATH.
 # MULTIBOX_VERSION picks another release, such as v0.1.1. MULTIBOX_INSTALL_DIR
 # picks another directory, which is then left to you to put on PATH.
@@ -46,6 +46,14 @@
         Expand-Archive "$temp\$name.zip" $temp -Force
         New-Item -ItemType Directory -Force $dir | Out-Null
         Copy-Item "$temp\$name\git-multibox.exe" $dir -Force
+        # Releases from before the window shipped hold only the command-line tool.
+        if (Test-Path "$temp\$name\multibox-ui.exe") {
+            try {
+                Copy-Item "$temp\$name\multibox-ui.exe" $dir -Force
+            } catch {
+                throw "Could not replace $dir\multibox-ui.exe, probably because a Multibox window is open. Close it and run the installer again."
+            }
+        }
     } finally {
         Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -70,4 +78,7 @@
         Write-Warning "$($first.Source) comes first on PATH, so git will run that one instead."
     }
     Write-Host "Next, inside a repository: git multibox doctor"
+    if (Test-Path (Join-Path $dir 'multibox-ui.exe')) {
+        Write-Host "To see every worktree and clean them up in a window: git multibox ui"
+    }
 }

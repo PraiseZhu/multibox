@@ -27,10 +27,10 @@ macOS：
 curl -fsSL https://raw.githubusercontent.com/fpgames/multibox/main/install.sh | sh
 ```
 
-两条命令都会下载最新的[发布版本](https://github.com/fpgames/multibox/releases)，核对 `SHA256SUMS` 之后再安装。Windows 会自动加进 PATH，新开的终端就能用；macOS 装在 `~/.local/bin`，如果这个目录不在 PATH 里，安装结束时会打印一行加 PATH 的命令。其他系统，或者想用 Rust 自己编译：
+两条命令都会下载最新的[发布版本](https://github.com/fpgames/multibox/releases)，核对 `SHA256SUMS` 之后再安装命令行工具和它的图形界面。Windows 会自动加进 PATH，新开的终端就能用；macOS 装在 `~/.local/bin`，如果这个目录不在 PATH 里，安装结束时会打印一行加 PATH 的命令。其他系统，或者想用 Rust 自己编译：
 
 ```bash
-cargo install --locked --git https://github.com/fpgames/multibox git-multibox
+cargo install --locked --git https://github.com/fpgames/multibox git-multibox multibox-ui
 ```
 
 ## 怎么用
@@ -42,6 +42,7 @@ git multibox add ../feature -b feature   # 代替 git worktree add
 # ……在 ../feature 里干活、提交……
 git multibox finish ../feature           # 合并回当前分支，再删掉工作区和分支
 git multibox remove ../feature           # 或者直接丢弃
+git multibox ui                          # 打开窗口：看每个工作区占多少空间，点按钮清理
 ```
 
 `git multibox doctor` 会告诉你这台机器和这个仓库能用上什么，`git multibox -h` 列出全部命令。

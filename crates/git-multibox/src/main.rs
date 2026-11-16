@@ -21,6 +21,7 @@ usage: git multibox add [<options>] <path> [<commit-ish>]
        git multibox remove [-f] <worktree>
        git multibox finish [--keep-branch] [--wait] [--json] <worktree> [-- <merge options>]
        git multibox <list|lock|move|prune|repair|unlock> ...
+       git multibox ui [<path>]
        git multibox init [--project <path>] [--to <path>] [--exclude <path>]... [--dry-run]
        git multibox doctor [--json]
        git multibox env [--json]
@@ -48,6 +49,10 @@ that hits conflicts in progress, as git does. Run it again once committed.
     --keep-branch       keep the branch after merging it
     --wait              delete in the foreground instead of in the background
     --json              print the result as JSON on stdout
+
+ui opens a window on the repository at <path>, the current directory by
+default: every worktree with the disk it takes, and buttons to finish, remove,
+lock and clean them up. The terminal is free again right away.
 
 Every option of `git worktree add` is accepted and passed through.
 
@@ -686,6 +691,53 @@ fn run_migrate(cwd: &Path, args: Vec<String>) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The window program, shipped in the same archive and installed beside this
+/// one; `cargo install` puts both in the same directory too. PATH is the
+/// fallback for anything installed by hand.
+fn ui_program() -> Option<PathBuf> {
+    let name = if cfg!(windows) {
+        "multibox-ui.exe"
+    } else {
+        "multibox-ui"
+    };
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
+        .filter(|path| path.is_file());
+    beside.or_else(|| {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+    })
+}
+
+fn run_ui(cwd: &Path, args: Vec<String>) -> Result<ExitCode, String> {
+    let mut path = None;
+    for arg in args {
+        match arg.as_str() {
+            flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
+            _ if path.is_none() => path = Some(arg),
+            _ => return Err("ui takes at most one <path>".to_owned()),
+        }
+    }
+    let dir = match path {
+        Some(path) => real_directory(cwd.join(path)),
+        None => cwd.to_path_buf(),
+    };
+    let repo = git::Repo::discover(&dir).map_err(|err| err.to_string())?;
+    let program = ui_program().ok_or(
+        "multibox-ui is not installed beside git-multibox; install Multibox again with install.ps1 or install.sh, or run `cargo install --locked --git https://github.com/fpgames/multibox multibox-ui`",
+    )?;
+    let mut command = Command::new(&program);
+    command.arg(&repo.worktree);
+    // Its own process group, so that Ctrl+C in this terminal leaves it open.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    spawn_detached(command).map_err(|err| format!("cannot start {}: {err}", program.display()))?;
+    eprintln!("multibox: opened a window on {}", repo.worktree.display());
+    Ok(ExitCode::SUCCESS)
+}
+
 fn passthrough(cwd: &Path, subcommand: &str, args: Vec<String>) -> Result<ExitCode, String> {
     let mut full = vec!["worktree".to_owned(), subcommand.to_owned()];
     full.extend(args);
@@ -709,8 +761,8 @@ fn real_directory(cwd: PathBuf) -> PathBuf {
 }
 
 /// Commands this program implements itself; git answers `-h` for the rest.
-const OWN_COMMANDS: [&str; 8] = [
-    "add", "remove", "finish", "doctor", "env", "setup", "init", "migrate",
+const OWN_COMMANDS: [&str; 9] = [
+    "add", "remove", "finish", "doctor", "env", "setup", "init", "migrate", "ui",
 ];
 
 /// `-h` or `--help` among a command's own options, before any `--`.
@@ -741,6 +793,7 @@ fn run() -> Result<ExitCode, String> {
         "setup" => run_setup_command(args),
         "init" => run_init(&cwd, args),
         "migrate" => run_migrate(&cwd, args),
+        "ui" => run_ui(&cwd, args),
         "__purge" => {
             let trash = args.first().ok_or("__purge needs a path")?;
             purge_trash(Path::new(trash)).map_err(|err| err.to_string())?;

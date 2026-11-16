@@ -1,7 +1,9 @@
 name: Release
 
-# Pushing a tag such as v0.1.0 builds git-multibox on the project's own
-# Windows and Mac machines and publishes the archives with their checksums.
+# Pushing a tag such as v0.1.0 builds git-multibox and its window, multibox-ui,
+# on the project's own Windows and Mac machines and publishes the archives with
+# their checksums. Each archive holds both programs: `git multibox ui` starts
+# the one installed beside it.
 
 on:
   push:
@@ -20,14 +22,14 @@ jobs:
         shell: cmd
     steps:
       - uses: actions/checkout@v4
-      - run: cargo build --release --locked -p git-multibox
+      - run: cargo build --release --locked -p git-multibox -p multibox-ui
       # Windows' own tar writes the zip: Compress-Archive in Windows PowerShell
       # separates paths with backslashes, which the format does not allow.
       - name: Package
         run: |
           set "NAME=git-multibox-%GITHUB_REF_NAME%-x86_64-pc-windows-msvc"
           mkdir "dist\%NAME%" || exit /b 1
-          for %%f in (target\release\git-multibox.exe README.md README.en.md LICENSE-MIT LICENSE-APACHE) do (
+          for %%f in (target\release\git-multibox.exe target\release\multibox-ui.exe README.md README.en.md LICENSE-MIT LICENSE-APACHE) do (
             copy /y "%%f" "dist\%NAME%\" >nul || exit /b 1
           )
           "%SystemRoot%\System32\tar.exe" -a -cf "dist\%NAME%.zip" -C dist "%NAME%"
@@ -44,10 +46,10 @@ jobs:
         run: |
           set -eu
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release --locked -p git-multibox --target "$target"
+            cargo build --release --locked -p git-multibox -p multibox-ui --target "$target"
             name="git-multibox-$GITHUB_REF_NAME-$target"
             mkdir -p "dist/$name"
-            cp "target/$target/release/git-multibox" README.md README.en.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+            cp "target/$target/release/git-multibox" "target/$target/release/multibox-ui" README.md README.en.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
             # Without these, macOS metadata travels as ._ files and xattr
             # headers that other systems unpack as clutter.
             COPYFILE_DISABLE=1 /usr/bin/tar --no-xattrs --no-mac-metadata \

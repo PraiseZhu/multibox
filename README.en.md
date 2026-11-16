@@ -35,11 +35,12 @@ curl -fsSL https://raw.githubusercontent.com/fpgames/multibox/main/install.sh | 
 ```
 
 Both download the latest [release](https://github.com/fpgames/multibox/releases)
-and check it against its `SHA256SUMS` before installing. Elsewhere, or to build
+and check it against its `SHA256SUMS` before installing the command-line tool
+and its window. Elsewhere, or to build
 it yourself with Rust:
 
 ```bash
-cargo install --locked --git https://github.com/fpgames/multibox git-multibox
+cargo install --locked --git https://github.com/fpgames/multibox git-multibox multibox-ui
 ```
 
 ## Use it
@@ -51,6 +52,7 @@ git multibox add ../feature -b feature   # instead of git worktree add
 # ... work and commit in ../feature ...
 git multibox finish ../feature           # merge it back here, then remove the worktree and branch
 git multibox remove ../feature           # or throw it away
+git multibox ui                          # a window: what each worktree takes on disk, and buttons to clean up
 ```
 
 `git multibox doctor` shows what the machine and the repository allow, and
