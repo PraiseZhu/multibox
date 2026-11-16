@@ -5,6 +5,7 @@ mod render;
 use crate::format;
 use crate::model::{self, Details, Snapshot, Worktree};
 use crate::ops::{self, AddWatch};
+use crate::state;
 use crate::theme::{self, Palette};
 use crate::usage::{self, ScanProgress, ScanRequest, Usage};
 use gpui_kit::assets::IconName;
@@ -159,6 +160,11 @@ impl MultiboxApp {
                 .update(cx, |this, cx| {
                     if this.generation != generation {
                         return false;
+                    }
+                    if this.snapshot.is_none() {
+                        // Keep the main worktree so removing a linked worktree
+                        // does not leave the next launch pointing at it.
+                        state::remember_repository(&snapshot.main);
                     }
                     let present: HashSet<&PathBuf> =
                         snapshot.worktrees.iter().map(|w| &w.path).collect();

@@ -6,7 +6,8 @@
 //!
 //! Usually started by `git multibox ui`, from the same directory. Run alone:
 //! `multibox-ui [<directory in a repository>]`, defaulting to the
-//! current directory. Without a repository the window asks for one.
+//! current directory, then the last successfully opened repository. Without
+//! either repository the window asks for one.
 
 // No console window behind the app on Windows.
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -14,6 +15,7 @@
 mod format;
 mod model;
 mod ops;
+mod state;
 mod theme;
 mod usage;
 mod view;
@@ -24,15 +26,8 @@ use gpui_kit::{
 use std::path::PathBuf;
 
 fn repository_argument() -> Option<PathBuf> {
-    let candidate = match std::env::args_os().nth(1) {
-        Some(arg) => PathBuf::from(arg),
-        None => std::env::current_dir().ok()?,
-    };
-    // Only a directory inside a repository is taken; anything else opens the
-    // window empty, asking for one.
-    multibox_core::git::Repo::discover(&candidate)
-        .ok()
-        .map(|repo| repo.worktree)
+    let argument = std::env::args_os().nth(1).map(PathBuf::from);
+    state::startup_repository(argument.as_deref(), std::env::current_dir().ok().as_deref())
 }
 
 fn main() {
