@@ -30,6 +30,27 @@ fn repository_argument() -> Option<PathBuf> {
     state::startup_repository(argument.as_deref(), std::env::current_dir().ok().as_deref())
 }
 
+/// The program runs as a bare executable, with no app bundle to take an icon
+/// from, so the Dock and the app switcher would show a generic one. On
+/// Windows the icon is built into the program instead; see `build.rs`.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+    let png = NSData::with_bytes(include_bytes!("../icons/multibox-macos.png"));
+    if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &png) {
+        // SAFETY: on the main thread, and the image is not nil.
+        unsafe {
+            NSApplication::sharedApplication(main_thread).setApplicationIconImage(Some(&icon));
+        }
+    }
+}
+
 fn main() {
     let repo = repository_argument();
     // Windows refuses to delete or rename a directory that a process works in,
@@ -43,6 +64,8 @@ fn main() {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx: &mut App| {
+            #[cfg(target_os = "macos")]
+            set_dock_icon();
             gpui_kit::init(cx);
             let refresh = if cfg!(target_os = "macos") {
                 "cmd-r"

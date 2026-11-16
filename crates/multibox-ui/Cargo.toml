@@ -26,3 +26,17 @@ windows-sys = { workspace = true, features = ["Win32_System_Time"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# Hands the Dock the window's icon. The versions GPUI itself uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+
+# Builds the icon into the Windows program; see build.rs.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
+[dev-dependencies]
+# Draws the icon files from their SVG sources: the `icons` example.
+resvg = { version = "0.46", default-features = false }
