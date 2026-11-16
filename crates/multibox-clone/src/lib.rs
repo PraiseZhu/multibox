@@ -26,7 +26,7 @@ pub use exec::{Failure, Options, Progress, Report, Strategy, execute};
 pub use purge::{PurgeReport, purge};
 pub use scan::{Decision, DirEntry, FileEntry, LinkEntry, Manifest, ScanRequest, TreeFilter, scan};
 pub use sync::{SyncReport, sync};
-pub use sys::{Capability, free_space, os_build, probe, volumes};
+pub use sys::{Capability, free_space, no_console_window, os_build, probe, volumes};
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;

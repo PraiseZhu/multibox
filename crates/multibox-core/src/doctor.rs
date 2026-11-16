@@ -49,7 +49,9 @@ pub fn windows_build() -> Option<(u32, u32)> {
 }
 
 fn tool_version(tool: &str) -> Option<String> {
-    let out = Command::new(tool).arg("--version").output().ok()?;
+    let out = multibox_clone::no_console_window(Command::new(tool).arg("--version"))
+        .output()
+        .ok()?;
     out.status.success().then(|| {
         String::from_utf8_lossy(&out.stdout)
             .lines()

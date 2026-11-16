@@ -139,6 +139,11 @@ pub fn os_build() -> Option<(u32, u32)> {
     None
 }
 
+/// Console windows are a Windows matter; nothing to do here.
+pub fn no_console_window(command: &mut std::process::Command) -> &mut std::process::Command {
+    command
+}
+
 /// Unix volumes need no setup, so there is nothing to enumerate.
 pub fn volumes() -> Vec<Volume> {
     Vec::new()

@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 fn command(dir: &Path) -> Command {
     let mut command = Command::new("git");
     command.current_dir(dir);
+    multibox_clone::no_console_window(&mut command);
     command
 }
 

@@ -194,10 +194,26 @@ pub fn probe(src: &Path, dst: &Path) -> io::Result<Capability> {
     })
 }
 
+/// Keeps a console program started by `command` from opening a console window
+/// of its own. That happens when this process has no console to share, as in a
+/// windowed program embedding these crates, which would otherwise flash one
+/// for every git it runs. A process with a console is left as it was.
+pub fn no_console_window(command: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Console::GetConsoleWindow;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if unsafe { GetConsoleWindow() }.is_null() {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// Windows build and revision. `ver` is the one source that reports the real
 /// version without a manifest, and its digits do not depend on the language.
 pub fn os_build() -> Option<(u32, u32)> {
-    let output = Command::new("cmd").args(["/c", "ver"]).output().ok()?;
+    let output = no_console_window(Command::new("cmd").args(["/c", "ver"]))
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
     let start = text.find("10.0.")? + "10.0.".len();
     let digits: String = text[start..]
@@ -508,11 +524,13 @@ fn make_junction(link: &Path, target: &Path) -> io::Result<()> {
             .unwrap_or(&text)
             .replace('/', "\\")
     };
-    let output = Command::new("cmd")
-        .args(["/c", "mklink", "/J"])
-        .arg(native(link))
-        .arg(native(target))
-        .output()?;
+    let output = no_console_window(
+        Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(native(link))
+            .arg(native(target)),
+    )
+    .output()?;
     if output.status.success() {
         Ok(())
     } else {
