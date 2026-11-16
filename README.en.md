@@ -2,23 +2,60 @@
 
 [简体中文](README.md) | English
 
-**`git worktree`, but the new worktree is ready to work in.**
+**`git worktree` for game development: a new worktree is ready to work in, with no reimport and no full rebuild.**
 
-`git multibox add` takes the same arguments as `git worktree add` and makes a
-normal git worktree. The difference is what is inside it: a native worktree is
-a clean checkout, so Unity reimports every asset and Rust recompiles every
-dependency before you can start. Multibox brings the caches that are safe to
-reuse along from the worktree you are in, and leaves the rest to be rebuilt.
+A native `git worktree` is a clean checkout, so Unity reimports every asset and
+Rust recompiles every dependency before you can start. `git multibox add` takes
+the same arguments as `git worktree add` and makes a normal git worktree, but
+brings along the caches that are safe to reuse from the worktree you are in,
+such as Unity's `Library/` and Rust's compiled dependencies.
 
-## What it is for
+It is for several AI agents or people working on one machine, each in a
+worktree of its own, and for trying a branch next to your work while your main
+checkout and its editor stay untouched. It knows Unity, Rust (Cargo), pnpm and
+TypeScript projects. Any other repository works too, and gets exactly what
+`git worktree add` would give it.
 
-- **Several agents or people on one machine**, each in a worktree of its own,
-  without each one waiting for a reimport or a full build.
-- **Trying a branch next to your work**, while your main checkout and its
-  editor stay open and untouched.
+## Measured
 
-It knows Unity, Rust (Cargo), pnpm and TypeScript projects. Any other
-repository works too, and gets exactly what `git worktree add` would give it.
+One Windows workstation, three real projects, against native `git worktree`,
+with nothing configured. Each figure covers the steps named, from creating the
+worktree.
+
+| Project, steps | NTFS native | NTFS Multibox | Dev Drive native | Dev Drive Multibox |
+| --- | --- | --- | --- | --- |
+| Unity 6 game, 104,330 files: create and first launch | 1,165 s | **91 s** | 873 s | **80 s** |
+| Disk afterwards | 49.5 GiB | **15.3 GiB** | 47.8 GiB | **2.9 GiB** |
+| Rust workspace, 970 packages: create and build the tests | 238 s | **156 s** | 233 s | **148 s** |
+| Disk afterwards | 30.2 GiB | **27.5 GiB** | 30.3 GiB | **24.5 GiB** |
+| pnpm monorepo with Rust helpers: create, install, type check, dev build, installer | 497 s | **361 s** | 498 s | **326 s** |
+| Disk afterwards | 5.2 GiB | **3.0 GiB** | 4.7 GiB | **1.9 GiB** |
+
+- The Unity worktree opened after 1 import instead of 56,961. The Rust
+  worktree compiled the workspace's own 22 packages instead of 581.
+- On macOS, a 47 GiB Unity project: a worktree in 15 s (49 s natively),
+  taking 110 MiB with its `Library/` (8.4 GiB natively, without one).
+- Merging gives the same commits as with native worktrees, to the commit id.
+- Not faster: on NTFS, pnpm's install takes as long as natively.
+  `node_modules/` stays behind, since pnpm installs from a store shared between
+  projects and there is little to save.
+
+Every figure and how it was measured: [docs/benchmarks.md](docs/benchmarks.md).
+
+## The window
+
+`git multibox ui` opens a window showing what each worktree takes on disk,
+where that space goes, and whether it has uncommitted work or is already
+merged. New, finish, remove and lock are buttons, and one cleanup removes
+merged worktrees and what interrupted removals left behind, listing everything
+before it deletes. The window is in Chinese for now.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/ui-dark.png">
+  <img alt="The Multibox window: total disk use, free space and what can be cleaned up at the top, the worktrees and their state in a list, and the selected worktree's breakdown and git details on the right" src="docs/images/ui-light.png">
+</picture>
+
+What each part shows: [crates/multibox-ui](crates/multibox-ui/README.md) (in Chinese).
 
 ## Install
 
@@ -34,10 +71,10 @@ macOS:
 curl -fsSL https://raw.githubusercontent.com/fpgames/multibox/main/install.sh | sh
 ```
 
-Both download the latest [release](https://github.com/fpgames/multibox/releases)
-and check it against its `SHA256SUMS` before installing the command-line tool
-and its window. Elsewhere, or to build
-it yourself with Rust:
+Both download the latest [release](https://github.com/fpgames/multibox/releases),
+check it against its `SHA256SUMS`, and install the command-line tool and the
+window. On macOS they go to `~/.local/bin`, with a hint if that is not on your
+PATH. Or build it with Rust:
 
 ```bash
 cargo install --locked --git https://github.com/fpgames/multibox git-multibox multibox-ui
@@ -49,68 +86,33 @@ Nothing to configure. In any repository:
 
 ```bash
 git multibox add ../feature -b feature   # instead of git worktree add
-# ... work and commit in ../feature ...
 git multibox finish ../feature           # merge it back here, then remove the worktree and branch
 git multibox remove ../feature           # or throw it away
-git multibox ui                          # a window: what each worktree takes on disk, and buttons to clean up
+git multibox ui                          # open the window
+git multibox doctor                      # what this machine and repository allow
 ```
 
-`git multibox doctor` shows what the machine and the repository allow, and
-`git multibox -h` lists every command.
+**On Windows, use a Dev Drive.** On NTFS a worktree is mostly a copy; only
+caches that are written once are shared, through hard links. On a Dev Drive,
+as on macOS, every file is shared until it changes, so a worktree takes
+seconds and almost no space. `git multibox init` creates one and moves the
+project onto it, once, while you keep working.
 
-**On Windows, put the project on a Dev Drive.** On NTFS a worktree is mostly a
-copy; only caches that are written once are shared, through hard links. On a
-Dev Drive, as on macOS, every file is shared until it changes, so a worktree
-takes seconds and almost no space. `git multibox init` creates one
-and moves the project onto it, once, while you keep working.
-
-## How it compares
-
-Measured on one Windows workstation against native `git worktree`, with nothing
-configured. Each figure covers the steps named, from creating the worktree.
-Details and more results are in [docs/benchmarks.md](docs/benchmarks.md).
-
-| Project, steps | NTFS native | NTFS Multibox | Dev Drive native | Dev Drive Multibox |
-| --- | --- | --- | --- | --- |
-| Unity 6 game, 104,330 files: create and first launch | 1,165 s | **91 s** | 873 s | **80 s** |
-| Disk afterwards | 49.5 GiB | **15.3 GiB** | 47.8 GiB | **2.9 GiB** |
-| Rust workspace, 970 packages: create and build the tests | 238 s | **156 s** | 233 s | **148 s** |
-| Disk afterwards | 30.2 GiB | **27.5 GiB** | 30.3 GiB | **24.5 GiB** |
-| pnpm monorepo with Rust helpers: create, install, type check, dev build, installer | 497 s | **361 s** | 498 s | **326 s** |
-| Disk afterwards | 5.2 GiB | **3.0 GiB** | 4.7 GiB | **1.9 GiB** |
-
-- The Unity worktree opened after one import instead of 56,961.
-- The Rust worktree compiled the workspace's own 22 packages; a native one
-  compiles 581. The monorepo's installer compiled 39 Rust crates instead of
-  425.
-- On NTFS, Unity's import results and the compiled Rust dependencies are
-  hard-linked to the source instead of copied: their tools write each file once
-  and never change it.
-- Merging gives the same commits as with native worktrees, to the commit id.
-  `finish` does merge, removal and branch deletion in one step.
-- `git worktree remove` failed on the monorepo, whose `node_modules/` paths are
-  too long for it; `git multibox remove` did not.
-
-Where it is not better:
-
-- On NTFS, pnpm's `node_modules/` stays behind: pnpm installs from a store
-  shared between projects, so there is little to save, and the install takes
-  as long as in a native worktree.
-
-## Settings
-
-The defaults need no file. To change the details, such as carrying more paths,
-copying large caches on NTFS too, or turning an engine off, add a
-`.multibox.toml` to the repository root. The [guide](docs/guide.md) describes
-it, along with how Multibox works, what it carries for each engine and every
-command.
+To carry more or less, add a `.multibox.toml` to the repository root. The
+[guide](docs/guide.md) describes it, how Multibox works and every command.
 
 ## Status
 
-Early. Used on Windows and macOS with real Unity 6 projects, a Rust workspace
-and a pnpm monorepo, and tested on every change on a Windows machine, on NTFS
-and on a Dev Drive, and on an Apple Silicon Mac. Linux builds but is untested.
-Unreal Engine is planned.
+Early. Used on Windows and macOS with real Unity 6, Rust and pnpm projects,
+and tested on every change on Windows, on NTFS and on a Dev Drive, and on an
+Apple Silicon Mac. Linux builds but is untested. Unreal Engine is planned.
+
+## Acknowledgements
+
+The window is built with [GPUI](https://www.gpui.rs), the framework behind the
+Zed editor, and [GPUI Kit](https://github.com/longbridge/gpui-kit), with icons
+from [Lucide](https://lucide.dev). Every release archive carries the licenses
+of all third-party code in `THIRD-PARTY-LICENSES.md`.
 
 ## License
 

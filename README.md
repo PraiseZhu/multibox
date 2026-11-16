@@ -2,16 +2,42 @@
 
 简体中文 | [English](README.en.md)
 
-**用法和 `git worktree` 一样，但新工作区一建好就能直接干活。**
+**给游戏开发用的 `git worktree`：新工作区一建好就能干活，不用等重新导入、重新编译。**
 
-`git multibox add` 的参数和 `git worktree add` 完全相同，建出来的也是普通的 git 工作区。区别在于里面有什么：原生工作区是一份干净的检出，Unity 得把所有资源重新导入一遍，Rust 得把所有依赖重新编译一遍，然后才能开始干活。Multibox 会把当前工作区里能安全复用的缓存一起带过去，不能复用的留给工具自己重建。
+原生 `git worktree` 建出来的是一份干净的检出，Unity 要把所有资源重新导入一遍，Rust 要把所有依赖重新编译一遍。`git multibox add` 的参数和 `git worktree add` 一样，建出来的也是普通的 git 工作区，但会把当前工作区里能安全复用的缓存一起带过去，比如 Unity 的 `Library/` 和 Rust 依赖的编译产物。
 
-## 用来干什么
+适合一台机器上多个 AI 代理或多个人同时干活，每个一个工作区；也适合在旁边试一个分支，主工作区和开着的编辑器都不受影响。它认识 Unity、Rust（Cargo）、pnpm 和 TypeScript 工程，其他仓库也能用，效果和 `git worktree add` 一样。
 
-- **一台机器上多个代理或多个人同时干活**：每人一个工作区，不用每个都等一次重新导入或完整编译。
-- **在旁边试一个分支**：你的主工作区和开着的编辑器都不受影响。
+## 实测
 
-它认识 Unity、Rust（Cargo）、pnpm 和 TypeScript 工程。其他仓库也能用，得到的和 `git worktree add` 完全一样。
+一台 Windows 工作站，三个真实工程，和原生 `git worktree` 对比，没做任何配置。时间从创建工作区算起，到跑完所列步骤为止。
+
+| 工程与步骤 | NTFS 原生 | NTFS Multibox | Dev Drive 原生 | Dev Drive Multibox |
+| --- | --- | --- | --- | --- |
+| Unity 6 游戏，104,330 个文件：创建并首次打开 | 1,165 秒 | **91 秒** | 873 秒 | **80 秒** |
+| 之后占用的磁盘 | 49.5 GiB | **15.3 GiB** | 47.8 GiB | **2.9 GiB** |
+| Rust 工作区，970 个包：创建并编译测试 | 238 秒 | **156 秒** | 233 秒 | **148 秒** |
+| 之后占用的磁盘 | 30.2 GiB | **27.5 GiB** | 30.3 GiB | **24.5 GiB** |
+| 带 Rust 组件的 pnpm monorepo：创建、装依赖、类型检查、开发构建、打安装包 | 497 秒 | **361 秒** | 498 秒 | **326 秒** |
+| 之后占用的磁盘 | 5.2 GiB | **3.0 GiB** | 4.7 GiB | **1.9 GiB** |
+
+- Unity 工作区首次打开只导入了 1 个资源，原生是 56,961 个；Rust 工作区只编译项目自己的 22 个包，原生是 581 个。
+- macOS 上一个 47 GiB 的 Unity 工程：建一个工作区 15 秒（原生 49 秒），连 `Library/` 在内只占 110 MiB（原生不含 `Library/` 也要 8.4 GiB）。
+- 合并的结果和原生工作区完全一样，连提交 id 都相同。
+- 没变快的：NTFS 上 pnpm 装依赖的耗时和原生一样。`node_modules/` 不带过去：pnpm 本来就从多个工程共用的 store 安装，带了也省不了多少。
+
+完整数据和测法见 [docs/benchmarks.md](docs/benchmarks.md)（英文）。
+
+## 工作区管理器
+
+`git multibox ui` 打开一个窗口：每个工作区占多少磁盘、空间花在哪、有没有没提交的改动、是不是已经合并。新建、合并、删除、锁定都能直接点；已合并的工作区和中断留下的残留目录可以一键清理，删之前都会先列出要删什么。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/ui-dark.png">
+  <img alt="Multibox 工作区管理器：顶部是总占用、磁盘剩余和可清理的空间，中间是工作区列表和各自的状态，右侧是选中工作区的占用明细和 Git 信息" src="docs/images/ui-light.png">
+</picture>
+
+每个部分的含义见[管理器说明](crates/multibox-ui/README.md)。
 
 ## 安装
 
@@ -27,58 +53,35 @@ macOS：
 curl -fsSL https://raw.githubusercontent.com/fpgames/multibox/main/install.sh | sh
 ```
 
-两条命令都会下载最新的[发布版本](https://github.com/fpgames/multibox/releases)，核对 `SHA256SUMS` 之后再安装命令行工具和它的图形界面。Windows 会自动加进 PATH，新开的终端就能用；macOS 装在 `~/.local/bin`，如果这个目录不在 PATH 里，安装结束时会打印一行加 PATH 的命令。其他系统，或者想用 Rust 自己编译：
+安装脚本会下载最新的[发布版本](https://github.com/fpgames/multibox/releases)，核对 `SHA256SUMS` 后装好命令行工具和管理器。macOS 装在 `~/.local/bin`，不在 PATH 里时会提示怎么加。也可以用 Rust 自己编译：
 
 ```bash
 cargo install --locked --git https://github.com/fpgames/multibox git-multibox multibox-ui
 ```
 
-## 怎么用
+## 用法
 
-不需要任何配置。在任意仓库里：
+不需要配置。在任意仓库里：
 
 ```bash
 git multibox add ../feature -b feature   # 代替 git worktree add
-# ……在 ../feature 里干活、提交……
 git multibox finish ../feature           # 合并回当前分支，再删掉工作区和分支
 git multibox remove ../feature           # 或者直接丢弃
-git multibox ui                          # 打开窗口：看每个工作区占多少空间，点按钮清理
+git multibox ui                          # 打开工作区管理器
+git multibox doctor                      # 这台机器和这个仓库能用上什么
 ```
 
-`git multibox doctor` 会告诉你这台机器和这个仓库能用上什么，`git multibox -h` 列出全部命令。
+**Windows 上建议用 Dev Drive。** NTFS 上工作区里的文件大多要复制，只有只写一次的缓存用硬链接共享；Dev Drive 和 macOS 上，文件在被修改之前都是共享的，建一个工作区只要几秒，几乎不占空间。`git multibox init` 会创建 Dev Drive 并把工程搬过去，只需做一次，搬的时候不耽误干活。
 
-**Windows 上建议把工程放到 Dev Drive。** 在 NTFS 上，工作区里的文件大多是复制的，只有只写一次的缓存用硬链接共享；在 Dev Drive 上（macOS 也一样），所有文件在被修改之前都是共享的，建一个工作区只要几秒，几乎不占空间。`git multibox init` 会创建 Dev Drive 并把工程搬过去，只需做一次，搬的过程中不耽误你继续干活。
-
-## 对比效果
-
-在一台 Windows 工作站上和原生 `git worktree` 对比，没有做任何配置。时间是从创建工作区开始、跑完所列步骤的总耗时。更多数据见 [docs/benchmarks.md](docs/benchmarks.md)（英文）。
-
-| 工程与步骤 | NTFS 原生 | NTFS Multibox | Dev Drive 原生 | Dev Drive Multibox |
-| --- | --- | --- | --- | --- |
-| Unity 6 游戏，104,330 个文件：创建并首次打开 | 1,165 秒 | **91 秒** | 873 秒 | **80 秒** |
-| 之后占用的磁盘 | 49.5 GiB | **15.3 GiB** | 47.8 GiB | **2.9 GiB** |
-| Rust 工作区，970 个包：创建并编译测试 | 238 秒 | **156 秒** | 233 秒 | **148 秒** |
-| 之后占用的磁盘 | 30.2 GiB | **27.5 GiB** | 30.3 GiB | **24.5 GiB** |
-| 带 Rust 组件的 pnpm monorepo：创建、装依赖、类型检查、开发构建、打安装包 | 497 秒 | **361 秒** | 498 秒 | **326 秒** |
-| 之后占用的磁盘 | 5.2 GiB | **3.0 GiB** | 4.7 GiB | **1.9 GiB** |
-
-- Unity 工作区首次打开只导入了 1 个资源，原生工作区是 56,961 个。
-- Rust 工作区只编译了项目自己的 22 个包，原生工作区要编译 581 个；monorepo 打安装包时编译了 39 个 Rust 包，原生要 425 个。
-- NTFS 上，Unity 的导入结果和 Rust 依赖的编译产物用硬链接和源工作区共享，不再复制：工具对这些文件只写一次，之后不会再改。
-- 合并的结果和用原生工作区完全一样，连提交 id 都相同。`finish` 一步完成合并、删除工作区和删除分支。
-- 在那个 monorepo 上，`git worktree remove` 因为 `node_modules/` 里的路径太长而失败，`git multibox remove` 没有问题。
-
-没有做得更好的地方：
-
-- NTFS 上，pnpm 的 `node_modules/` 默认不带：pnpm 本来就从多个工程共用的 store 安装，带过去省不了多少，所以装依赖的耗时和原生一样。
-
-## 设置
-
-默认不需要任何配置文件。想调整细节，比如多带一些路径、在 NTFS 上也复制大缓存、关掉某个引擎，就在仓库根目录放一个 `.multibox.toml`。[使用指南](docs/guide.md)（英文）里有它的写法，也讲了 Multibox 的原理、每种引擎会带哪些东西和全部命令。
+想多带或少带一些东西，在仓库根目录放一个 `.multibox.toml`。写法、原理和全部命令见[使用指南](docs/guide.md)（英文）。
 
 ## 状态
 
-早期版本。已在 Windows 和 macOS 上用于真实的 Unity 6 工程、一个 Rust 工作区和一个 pnpm monorepo；每次改动都会在一台 Windows 机器（NTFS 和 Dev Drive 各一遍）和一台 Apple 芯片的 Mac 上跑测试。Linux 能编译，但没有测试。Unreal Engine 在计划中。
+早期版本。已在 Windows 和 macOS 上用于真实的 Unity 6、Rust 和 pnpm 工程，每次改动都在 Windows（NTFS 和 Dev Drive）和 Apple 芯片的 Mac 上跑测试。Linux 能编译，但没有测试；Unreal Engine 在计划中。
+
+## 致谢
+
+管理器用 [GPUI](https://www.gpui.rs)（Zed 编辑器的界面框架）和 [GPUI Kit](https://github.com/longbridge/gpui-kit) 写成，图标来自 [Lucide](https://lucide.dev)。所有第三方依赖的许可证都附在每个发布包的 `THIRD-PARTY-LICENSES.md` 里。
 
 ## 许可证
 
