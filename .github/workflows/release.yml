@@ -23,6 +23,17 @@ jobs:
       run:
         shell: cmd
     steps:
+      # This log is public. From here on, what would say whose machine runs
+      # it reads as ***: the home directory, the computer and the runner. The
+      # runner's own header above this step still names the computer; nothing
+      # in a workflow reaches that.
+      - name: Mask the machine
+        run: |
+          echo ::add-mask::%USERPROFILE%
+          set "SLASHED=%USERPROFILE:\=/%"
+          echo ::add-mask::%SLASHED%
+          echo ::add-mask::%COMPUTERNAME%
+          echo ::add-mask::%RUNNER_NAME%
       - uses: actions/checkout@v4
       # Dependencies' panic messages carry the paths of their sources, which
       # would put the build machine's home directory, and the account name in
@@ -62,6 +73,14 @@ jobs:
   macos:
     runs-on: [self-hosted, macOS, ARM64]
     steps:
+      # As on Windows: the home directory, the computer and the runner read
+      # as *** in this public log from here on.
+      - name: Mask the machine
+        run: |
+          for value in "$HOME" "$(scutil --get ComputerName 2>/dev/null)" \
+            "$(scutil --get LocalHostName 2>/dev/null)" "$(hostname)" "$RUNNER_NAME"; do
+            if [ -n "$value" ]; then echo "::add-mask::$value"; fi
+          done
       - uses: actions/checkout@v4
       - name: Build and package
         run: |
@@ -98,6 +117,18 @@ jobs:
       contents: write
     steps:
       # A directory of this job's own: the workspace holds the Windows build's.
+      # This log is public. From here on, what would say whose machine runs
+      # it reads as ***: the home directory, the computer and the runner. The
+      # runner's own header above this step still names the computer; nothing
+      # in a workflow reaches that.
+      - name: Mask the machine
+        shell: cmd
+        run: |
+          echo ::add-mask::%USERPROFILE%
+          set "SLASHED=%USERPROFILE:\=/%"
+          echo ::add-mask::%SLASHED%
+          echo ::add-mask::%COMPUTERNAME%
+          echo ::add-mask::%RUNNER_NAME%
       - uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/release

@@ -28,6 +28,17 @@ jobs:
       run:
         shell: cmd
     steps:
+      # This log is public. From here on, what would say whose machine runs
+      # it reads as ***: the home directory, the computer and the runner. The
+      # runner's own header above this step still names the computer; nothing
+      # in a workflow reaches that.
+      - name: Mask the machine
+        run: |
+          echo ::add-mask::%USERPROFILE%
+          set "SLASHED=%USERPROFILE:\=/%"
+          echo ::add-mask::%SLASHED%
+          echo ::add-mask::%COMPUTERNAME%
+          echo ::add-mask::%RUNNER_NAME%
       - uses: actions/checkout@v4
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -55,6 +66,14 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, macOS, ARM64]
     steps:
+      # As on Windows: the home directory, the computer and the runner read
+      # as *** in this public log from here on.
+      - name: Mask the machine
+        run: |
+          for value in "$HOME" "$(scutil --get ComputerName 2>/dev/null)" \
+            "$(scutil --get LocalHostName 2>/dev/null)" "$(hostname)" "$RUNNER_NAME"; do
+            if [ -n "$value" ]; then echo "::add-mask::$value"; fi
+          done
       - uses: actions/checkout@v4
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
