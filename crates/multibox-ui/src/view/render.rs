@@ -22,9 +22,9 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, AnyView, App, BoxShadow, ClickEvent, Context, Div, ElementId, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, Window, div, hsla, point, prelude::FluentBuilder, px,
-    relative,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Window, WindowControlArea, div,
+    hsla, point, prelude::FluentBuilder, px, relative, rgb,
 };
 use std::sync::atomic::Ordering;
 
@@ -63,6 +63,71 @@ fn tip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyVi
         .py(px(8.))
         .build(window, cx)
     }
+}
+
+/// Whether the window's top bar is its title bar. On Windows it has the
+/// window's three buttons at its right end; on macOS the system's three sit
+/// in it at the left. Linux keeps the window manager's title bar.
+pub const OWN_TITLE_BAR: bool = cfg!(any(windows, target_os = "macos"));
+
+/// The height of the top bar.
+pub const TOP_BAR: f32 = 56.;
+
+/// Room at the left of the top bar for macOS's three buttons.
+const TRAFFIC_LIGHTS: f32 = 88.;
+
+/// Minimise, maximise or restore, and close, as Windows lays them out: 46 px
+/// wide each, the full height of the bar, close turning red. Windows itself
+/// answers them, and offers its snap layouts over the middle one.
+fn window_controls(window: &Window, palette: &Palette) -> Option<AnyElement> {
+    if !(OWN_TITLE_BAR && cfg!(windows)) {
+        return None;
+    }
+    let control = |id: &'static str, icon: IconName, area: WindowControlArea| {
+        let close = area == WindowControlArea::Close;
+        let (hover, pressed, ink) = if close {
+            let red: Hsla = rgb(0xc42b1c).into();
+            (red, red.opacity(0.9), hsla(0., 0., 1., 1.))
+        } else {
+            (palette.hover, palette.selected, palette.ink)
+        };
+        div()
+            .id(id)
+            .flex()
+            .flex_none()
+            .w(px(46.))
+            .h_full()
+            .items_center()
+            .justify_center()
+            .text_color(palette.ink2)
+            .occlude()
+            .window_control_area(area)
+            .hover(move |style| style.bg(hover).text_color(ink))
+            .active(move |style| style.bg(pressed).text_color(ink))
+            .child(Icon::new(icon).size(px(14.)))
+    };
+    let (middle, icon) = if window.is_maximized() {
+        ("restore", IconName::WindowRestore)
+    } else {
+        ("maximize", IconName::WindowMaximize)
+    };
+    Some(
+        h_flex()
+            .flex_none()
+            .h_full()
+            .child(control(
+                "minimize",
+                IconName::WindowMinimize,
+                WindowControlArea::Min,
+            ))
+            .child(control(middle, icon, WindowControlArea::Max))
+            .child(control(
+                "close",
+                IconName::WindowClose,
+                WindowControlArea::Close,
+            ))
+            .into_any_element(),
+    )
 }
 
 fn glyph(name: IconName, size: f32, color: Hsla) -> Icon {
@@ -494,7 +559,7 @@ impl MultiboxApp {
 
     // ---- top bar -------------------------------------------------------
 
-    fn header(&self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn header(&self, window: &Window, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let title = match &self.snapshot {
             Some(snapshot) => {
                 let name = snapshot
@@ -545,23 +610,63 @@ impl MultiboxApp {
             .refreshed_at
             .map(|at| format!("刷新并重新测量（F5）· 上次 {}", format::clock(at)))
             .unwrap_or_else(|| "刷新并重新测量（F5）".to_owned());
-        h_flex()
-            .flex_none()
-            .h(px(56.))
-            .px(px(24.))
+        // Where macOS draws its three buttons, unless the window fills the
+        // screen and they are hidden.
+        let left = if cfg!(target_os = "macos") && OWN_TITLE_BAR && !window.is_fullscreen() {
+            TRAFFIC_LIGHTS
+        } else {
+            24.
+        };
+        let controls = window_controls(window, palette);
+        // Everything that is not a control moves the window. What can be
+        // clicked or hovered blocks the mouse from the bar under it, or
+        // Windows would take the click for the title bar.
+        let bar = h_flex()
+            .id("title-bar")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .pl(px(left))
+            .pr(px(if controls.is_some() { 12. } else { 24. }))
             .gap(px(16.))
-            .bg(palette.card)
-            .border_b_1()
-            .border_color(palette.hairline)
+            .when(OWN_TITLE_BAR && cfg!(windows), |bar| {
+                bar.window_control_area(WindowControlArea::Drag)
+            })
+            .when(OWN_TITLE_BAR && cfg!(target_os = "macos"), |bar| {
+                bar.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, _| {
+                        if event.click_count == 2 {
+                            this.moving_window = false;
+                            window.titlebar_double_click();
+                        } else {
+                            this.moving_window = true;
+                        }
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.moving_window = false),
+                )
+                .on_mouse_down_out(cx.listener(|this, _, _, _| this.moving_window = false))
+                .on_mouse_move(cx.listener(|this, _, window, _| {
+                    if this.moving_window {
+                        this.moving_window = false;
+                        window.start_window_move();
+                    }
+                }))
+            })
             .child(title)
             .children(
                 self.snapshot
                     .as_ref()
-                    .and_then(|snapshot| self.disk_chip(snapshot, palette)),
+                    .and_then(|snapshot| self.disk_chip(snapshot, palette))
+                    .map(|chip| div().flex_none().occlude().child(chip)),
             )
             .child(
                 h_flex()
                     .flex_none()
+                    .occlude()
                     .gap(px(2.))
                     .child(
                         Button::new("open-repo")
@@ -601,13 +706,25 @@ impl MultiboxApp {
                     ),
             )
             .child(
-                Button::new("add")
-                    .outline()
-                    .icon(IconName::Plus)
-                    .label("新建工作区")
-                    .disabled(self.snapshot.is_none() || self.adding.is_some())
-                    .on_click(cx.listener(|this, _, window, cx| this.open_add_dialog(window, cx))),
-            )
+                div().flex_none().occlude().child(
+                    Button::new("add")
+                        .outline()
+                        .icon(IconName::Plus)
+                        .label("新建工作区")
+                        .disabled(self.snapshot.is_none() || self.adding.is_some())
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_add_dialog(window, cx)),
+                        ),
+                ),
+            );
+        h_flex()
+            .flex_none()
+            .h(px(TOP_BAR))
+            .bg(palette.card)
+            .border_b_1()
+            .border_color(palette.hairline)
+            .child(bar)
+            .children(controls)
             .into_any_element()
     }
 
@@ -1821,7 +1938,7 @@ impl Render for MultiboxApp {
         let palette = Palette::current(cx);
         // Room for four tiles of about 190 px beside the inspector.
         let wide = window.viewport_size().width >= px(OVERVIEW_IN_ONE_ROW);
-        let header = self.header(&palette, cx);
+        let header = self.header(window, &palette, cx);
 
         let content: AnyElement = match self.snapshot.clone() {
             None => self.empty(&palette, cx),

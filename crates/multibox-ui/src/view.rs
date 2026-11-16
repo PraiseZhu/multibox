@@ -2,6 +2,8 @@
 
 mod render;
 
+pub use render::{OWN_TITLE_BAR, TOP_BAR};
+
 use crate::format;
 use crate::model::{self, Details, Snapshot, Worktree};
 use crate::ops::{self, AddWatch};
@@ -77,6 +79,10 @@ pub struct MultiboxApp {
     refreshed_at: Option<SystemTime>,
     generation: u64,
     ticking: bool,
+    /// The left button went down on the top bar and the window has not been
+    /// moved yet: macOS leaves moving a window without a system title bar to
+    /// the app.
+    moving_window: bool,
     window: AnyWindowHandle,
     focus: FocusHandle,
     _appearance: Subscription,
@@ -109,6 +115,7 @@ impl MultiboxApp {
             refreshed_at: None,
             generation: 0,
             ticking: false,
+            moving_window: false,
             window: window.window_handle(),
             focus,
             _appearance: appearance,

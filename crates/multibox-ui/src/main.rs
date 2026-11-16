@@ -21,7 +21,8 @@ mod usage;
 mod view;
 
 use gpui_kit::{
-    App, AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+    App, AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, point, px,
+    size,
 };
 use std::path::PathBuf;
 
@@ -82,10 +83,16 @@ fn main() {
                     size(px(1360.), px(880.)),
                     cx,
                 ))),
+                // On Windows and macOS the window's top bar is its title bar,
+                // which a system one would only repeat above it; see
+                // `view::OWN_TITLE_BAR`. Linux keeps the window manager's.
                 titlebar: Some(TitlebarOptions {
                     title: Some("Multibox".into()),
-                    ..Default::default()
+                    appears_transparent: view::OWN_TITLE_BAR,
+                    traffic_light_position: cfg!(target_os = "macos")
+                        .then(|| point(px(20.), px((view::TOP_BAR - 14.) / 2.))),
                 }),
+                app_owns_titlebar_drag: view::OWN_TITLE_BAR,
                 window_min_size: Some(size(px(980.), px(600.))),
                 ..Default::default()
             };
