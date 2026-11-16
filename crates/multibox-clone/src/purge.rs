@@ -5,6 +5,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 #[derive(Debug, Default)]
 pub struct PurgeReport {
@@ -22,17 +23,52 @@ fn tolerate_missing(result: io::Result<()>) -> io::Result<()> {
     }
 }
 
-fn remove_file(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-            let mut permissions = fs::symlink_metadata(path)?.permissions();
-            #[allow(clippy::permissions_set_readonly_false)]
-            permissions.set_readonly(false);
-            fs::set_permissions(path, permissions)?;
-            fs::remove_file(path)
-        }
-        other => other,
+/// Removes a file or a link. A directory link needs `remove_dir` on Windows.
+///
+/// A read-only file is made writable and removed at once: a whole tree of
+/// them, as a Perforce workspace has, must not wait. Anything else that fails
+/// is retried a few times, as for directories: on Windows a file just written
+/// is often held for a moment by an indexer or a virus scanner, and removing
+/// it then fails with access denied or a sharing violation.
+fn remove_entry(path: &Path) -> io::Result<()> {
+    let once = || match fs::remove_file(path) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => fs::remove_dir(path).map_err(|_| err),
+        done => done,
+    };
+    let mut result = once();
+    if matches!(&result, Err(err) if err.kind() == io::ErrorKind::PermissionDenied)
+        && make_writable(path).unwrap_or(false)
+    {
+        result = once();
     }
+    let mut delay = Duration::from_millis(20);
+    for _ in 0..6 {
+        match &result {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => {
+                std::thread::sleep(delay);
+                delay *= 2;
+                result = once();
+            }
+            _ => break,
+        }
+    }
+    result
+}
+
+/// Clears the read-only flag. Whether there was one to clear.
+fn make_writable(path: &Path) -> io::Result<bool> {
+    let mut permissions = match fs::symlink_metadata(path) {
+        Ok(meta) => meta.permissions(),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    if !permissions.readonly() {
+        return Ok(false);
+    }
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)?;
+    Ok(true)
 }
 
 /// Removes an empty directory. On Windows a file deleted while another process
@@ -40,7 +76,7 @@ fn remove_file(path: &Path) -> io::Result<()> {
 /// handle closes, and so does a handle on the directory itself; both make the
 /// removal fail for a moment. A few short retries ride that out.
 fn remove_dir_patiently(path: &Path) -> io::Result<()> {
-    let mut delay = std::time::Duration::from_millis(20);
+    let mut delay = Duration::from_millis(20);
     for _ in 0..6 {
         match tolerate_missing(fs::remove_dir(path)) {
             Err(err) if err.kind() != io::ErrorKind::NotFound => {
@@ -88,9 +124,7 @@ pub fn purge(root: &Path, threads: Option<usize>) -> io::Result<PurgeReport> {
                     }
                     for rel in &leaves[start..(start + 64).min(leaves.len())] {
                         let path = join(&root, rel);
-                        // A directory link needs remove_dir on Windows.
-                        let removed = remove_file(&path).or_else(|_| fs::remove_dir(&path));
-                        if let Err(err) = tolerate_missing(removed) {
+                        if let Err(err) = tolerate_missing(remove_entry(&path)) {
                             failures.lock().unwrap().push(format!("{rel}: {err}"));
                         }
                     }
@@ -118,4 +152,61 @@ pub fn purge(root: &Path, threads: Option<usize>) -> io::Result<PurgeReport> {
         dirs: dirs.len() as u64,
         failures: failures.into_inner().unwrap(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scanner opening a file just written, as Windows Defender does, holds
+    /// it without sharing deletion: removing the file fails until it lets go.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_held_for_a_moment_is_still_removed() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("trash");
+        fs::create_dir_all(root.join("Library")).unwrap();
+        fs::write(root.join("Library/ArtifactDB"), b"artifact db").unwrap();
+        fs::write(root.join("readme.md"), b"readme").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(root.join("Library/ArtifactDB"))
+            .unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(held);
+        });
+        let report = purge(&root, Some(2)).unwrap();
+        releaser.join().unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn read_only_files_and_directory_links_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("trash");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(root.join("depot")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("kept.txt"), b"kept").unwrap();
+        let file = root.join("depot/checked-in.txt");
+        fs::write(&file, b"read only").unwrap();
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&file, permissions).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, root.join("link")).ok();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        let report = purge(&root, Some(2)).unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(!root.exists());
+        // The link was removed, not followed.
+        assert!(outside.join("kept.txt").exists());
+    }
 }

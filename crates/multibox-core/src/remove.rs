@@ -178,11 +178,24 @@ fn claim(path: &Path, name: &str) -> Result<Option<PathBuf>> {
         None => name,
     };
     let claimed = path.with_file_name(format!("{base}{CLAIM_MARK}{own}"));
-    match fs::rename(path, &claimed) {
-        Ok(()) => Ok(Some(claimed)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err.into()),
+    // On Windows a rename that loses the race to another one does not always
+    // find the trash gone: while the winner's rename is under way it is denied
+    // access, as it is while an indexer or a virus scanner holds the directory.
+    // Once the trash is gone it was claimed; until then, try again shortly.
+    let mut delay = std::time::Duration::from_millis(20);
+    for attempt in 0.. {
+        match fs::rename(path, &claimed) {
+            Ok(()) => return Ok(Some(claimed)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) if fs::symlink_metadata(path).is_err() => return Ok(None),
+            Err(err) if attempt == 6 => return Err(err.into()),
+            Err(_) => {
+                std::thread::sleep(delay);
+                delay *= 2;
+            }
+        }
     }
+    unreachable!("the loop returns by its seventh attempt")
 }
 
 /// A pipe held by the caller stays open for as long as any process has a copy of
