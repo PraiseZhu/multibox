@@ -1,0 +1,22 @@
+# Third-party licenses
+
+git-multibox and multibox-ui are built from the open-source crates below, and
+the window shows icons from [Lucide](https://lucide.dev). Their licenses ask
+that these notices come with every copy of the programs.
+
+{{#each overview}}
+- {{{name}}}: {{count}} {{#if (eq count 1)}}crate{{else}}crates{{/if}}
+{{/each}}
+
+{{#each licenses}}
+## {{{name}}}
+
+{{#each used_by}}
+- [{{{crate.name}}} {{{crate.version}}}]({{#if crate.repository}}{{{crate.repository}}}{{else}}https://crates.io/crates/{{{crate.name}}}{{/if}})
+{{/each}}
+
+```text
+{{{text}}}
+```
+
+{{/each}}

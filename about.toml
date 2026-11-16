@@ -1,0 +1,43 @@
+# The third-party notices that travel with every release:
+#
+#   cargo about generate --locked -o THIRD-PARTY-LICENSES.md about.hbs
+#
+# The release workflow runs this; deny.toml decides which licenses may come in.
+
+# For a crate under a choice of licenses, the first of these it offers is the
+# one its notice is given under.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MIT-0",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "MPL-2.0",
+]
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# Multibox's own crates; their licenses are LICENSE-MIT and LICENSE-APACHE.
+private = { ignore = true }
+
+# The window embeds Lucide's icons, which GPUI Kit's asset crate ships under
+# their own ISC license beside its Apache-2.0 code.
+[gpui-kit-assets.clarify]
+license = "Apache-2.0 AND ISC"
+
+[[gpui-kit-assets.clarify.files]]
+path = "LICENSE-LUCIDE"
+license = "ISC"
+checksum = "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57"

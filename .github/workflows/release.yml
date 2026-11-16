@@ -3,7 +3,9 @@ name: Release
 # Pushing a tag such as v0.1.0 builds git-multibox and its window, multibox-ui,
 # on the project's own Windows and Mac machines and publishes the archives with
 # their checksums. Each archive holds both programs: `git multibox ui` starts
-# the one installed beside it.
+# the one installed beside it. It also holds THIRD-PARTY-LICENSES.md, the
+# notices of every crate compiled into them, which their licenses ask to travel
+# with each copy.
 
 on:
   push:
@@ -22,14 +24,31 @@ jobs:
         shell: cmd
     steps:
       - uses: actions/checkout@v4
-      - run: cargo build --release --locked -p git-multibox -p multibox-ui
+      # Dependencies' panic messages carry the paths of their sources, which
+      # would put the build machine's home directory, and the account name in
+      # it, into every copy. rustc writes them as ~ and . instead; the check
+      # after the build fails the release if any is left.
+      - name: Build
+        run: |
+          set "RUSTFLAGS=--remap-path-prefix=%USERPROFILE%=~ --remap-path-prefix=%CD%=."
+          cargo build --release --locked -p git-multibox -p multibox-ui || exit /b 1
+          findstr /m /i /l /c:"%USERPROFILE%" target\release\git-multibox.exe target\release\multibox-ui.exe
+          if not errorlevel 1 (
+            echo ::error::the programs above still hold paths of the build machine
+            exit /b 1
+          )
+          exit /b 0
+      - name: Third-party licenses
+        run: |
+          cargo install --locked cargo-about@0.9.3 --features cli || exit /b 1
+          cargo about generate --locked -o THIRD-PARTY-LICENSES.md about.hbs
       # Windows' own tar writes the zip: Compress-Archive in Windows PowerShell
       # separates paths with backslashes, which the format does not allow.
       - name: Package
         run: |
           set "NAME=git-multibox-%GITHUB_REF_NAME%-x86_64-pc-windows-msvc"
           mkdir "dist\%NAME%" || exit /b 1
-          for %%f in (target\release\git-multibox.exe target\release\multibox-ui.exe README.md README.en.md LICENSE-MIT LICENSE-APACHE) do (
+          for %%f in (target\release\git-multibox.exe target\release\multibox-ui.exe README.md README.en.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md) do (
             copy /y "%%f" "dist\%NAME%\" >nul || exit /b 1
           )
           "%SystemRoot%\System32\tar.exe" -a -cf "dist\%NAME%.zip" -C dist "%NAME%"
@@ -45,11 +64,19 @@ jobs:
       - name: Build and package
         run: |
           set -eu
+          cargo install --locked cargo-about@0.9.3 --features cli
+          cargo about generate --locked -o THIRD-PARTY-LICENSES.md about.hbs
+          # As on Windows: no paths of the build machine in the programs.
+          export RUSTFLAGS="--remap-path-prefix=$HOME=~ --remap-path-prefix=$PWD=."
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
             cargo build --release --locked -p git-multibox -p multibox-ui --target "$target"
+            if grep -a -l -F "$HOME" "target/$target/release/git-multibox" "target/$target/release/multibox-ui"; then
+              echo "::error::the programs above still hold paths of the build machine"
+              exit 1
+            fi
             name="git-multibox-$GITHUB_REF_NAME-$target"
             mkdir -p "dist/$name"
-            cp "target/$target/release/git-multibox" "target/$target/release/multibox-ui" README.md README.en.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+            cp "target/$target/release/git-multibox" "target/$target/release/multibox-ui" README.md README.en.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.md "dist/$name/"
             # Without these, macOS metadata travels as ._ files and xattr
             # headers that other systems unpack as clutter.
             COPYFILE_DISABLE=1 /usr/bin/tar --no-xattrs --no-mac-metadata \

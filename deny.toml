@@ -1,0 +1,53 @@
+# What CI lets into the programs Multibox ships: `cargo deny check`.
+#
+# Releases are licensed MIT OR Apache-2.0 and carry every dependency's notice
+# (THIRD-PARTY-LICENSES.md, written by cargo-about from about.toml). So only
+# permissive licenses are allowed, plus MPL-2.0, which asks nothing of programs
+# that use its files unchanged. Anything else, a copyleft license above all,
+# fails the build until someone decides about it.
+
+[graph]
+# The platforms there are releases for.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+exclude-dev = true
+
+[advisories]
+# A vulnerability in any dependency fails the build: upgrade, or name the
+# advisory here with the reason it does not apply. A crate whose author has
+# stopped maintaining it fails the build only when Multibox depends on it
+# directly; deeper down, as with the font and macro crates under GPUI, it is
+# reported and left to the crates that chose it.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Everything comes from crates.io.
+unknown-registry = "deny"
+unknown-git = "deny"
