@@ -10,7 +10,11 @@
 
 ## 实测
 
-一台 Windows 工作站，三个真实工程，和原生 `git worktree` 对比，没做任何配置。时间从创建工作区算起，到跑完所列步骤为止。
+Windows 和 macOS 上各测了 Unity、Rust、pnpm 三类真实工程，和原生 `git worktree` 对比，没做任何配置。时间从创建工作区算起，到跑完所列步骤为止。
+
+### Windows
+
+一台工作站（32 线程、61 GiB 内存、Gen4 NVMe），普通 NTFS 盘和 Dev Drive 各测一遍。
 
 | 工程与步骤 | NTFS 原生 | NTFS Multibox | Dev Drive 原生 | Dev Drive Multibox |
 | --- | --- | --- | --- | --- |
@@ -21,10 +25,24 @@
 | 带 Rust 组件的 pnpm monorepo：创建、装依赖、类型检查、开发构建、打安装包 | 497 秒 | **361 秒** | 498 秒 | **326 秒** |
 | 之后占用的磁盘 | 5.2 GiB | **3.0 GiB** | 4.7 GiB | **1.9 GiB** |
 
+### macOS
+
+APFS 上文件在被修改之前都是共享的，效果和 Windows 的 Dev Drive 一样，不用另外设置。
+
+| 工程与步骤 | 原生 | Multibox |
+| --- | --- | --- |
+| Unity 6 工程，202,929 个文件、47 GiB（M4 Mac mini）：创建 | 49 秒 | **15 秒** |
+| 之后占用的磁盘 | 8.4 GiB，还不含 `Library/` | **110 MiB，含 `Library/`** |
+| 首次打开 | 未测 | 82 秒，只导入 1 个资源 |
+| Rust 工作区，Multibox 自己的 38 个包（Mac Studio）：创建并编译测试 | 2.2 秒，编译 38 个包 | **1.4～1.7 秒，编译 3 个包** |
+| 同一个 pnpm monorepo，2,328 个包（Mac Studio）：创建并装依赖 | 12 秒 | 12 秒 |
+| 装完依赖后占用的磁盘 | 1.5 GiB | **1.1 GiB** |
+
+macOS 上的工程和步骤与 Windows 不完全相同：Rust 用的是 Multibox 自己的小工作区，pnpm 只测到装完依赖，Unity 原生的首次打开还没测。
+
 - Unity 工作区首次打开只导入了 1 个资源，原生是 56,961 个；Rust 工作区只编译项目自己的 22 个包，原生是 581 个。
-- macOS 上一个 47 GiB 的 Unity 工程：建一个工作区 15 秒（原生 49 秒），连 `Library/` 在内只占 110 MiB（原生不含 `Library/` 也要 8.4 GiB）。
 - 合并的结果和原生工作区完全一样，连提交 id 都相同。
-- 没变快的：NTFS 上 pnpm 装依赖的耗时和原生一样。`node_modules/` 不带过去：pnpm 本来就从多个工程共用的 store 安装，带了也省不了多少。
+- 没变快的：pnpm 装依赖的耗时在两个系统上都和原生一样。`node_modules/` 不带过去：pnpm 本来就从多个工程共用的 store 安装，带了也省不了多少。
 
 完整数据和测法见 [docs/benchmarks.md](docs/benchmarks.md)（英文）。
 

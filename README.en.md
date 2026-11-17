@@ -18,9 +18,14 @@ TypeScript projects. Any other repository works too, and gets exactly what
 
 ## Measured
 
-One Windows workstation, three real projects, against native `git worktree`,
-with nothing configured. Each figure covers the steps named, from creating the
-worktree.
+Three kinds of real project, Unity, Rust and pnpm, on Windows and on macOS,
+against native `git worktree`, with nothing configured. Each figure covers the
+steps named, from creating the worktree.
+
+### Windows
+
+One workstation (32 threads, 61 GiB RAM, Gen4 NVMe), on plain NTFS and on a
+Dev Drive.
 
 | Project, steps | NTFS native | NTFS Multibox | Dev Drive native | Dev Drive Multibox |
 | --- | --- | --- | --- | --- |
@@ -31,12 +36,28 @@ worktree.
 | pnpm monorepo with Rust helpers: create, install, type check, dev build, installer | 497 s | **361 s** | 498 s | **326 s** |
 | Disk afterwards | 5.2 GiB | **3.0 GiB** | 4.7 GiB | **1.9 GiB** |
 
+### macOS
+
+On APFS every file is shared until it changes, as on a Dev Drive, with nothing
+to set up.
+
+| Project, steps | Native | Multibox |
+| --- | --- | --- |
+| Unity 6 project, 202,929 files, 47 GiB (M4 Mac mini): create | 49 s | **15 s** |
+| Disk afterwards | 8.4 GiB, without `Library/` | **110 MiB, with `Library/`** |
+| First launch | not measured | 82 s, 1 import |
+| Rust: Multibox's own workspace, 38 packages (Mac Studio): create and build the tests | 2.2 s, 38 packages compiled | **1.4 to 1.7 s, 3 compiled** |
+| The same pnpm monorepo, 2,328 packages (Mac Studio): create and install | 12 s | 12 s |
+| Disk after the install | 1.5 GiB | **1.1 GiB** |
+
+The macOS projects and steps differ from the Windows ones: Rust is Multibox's
+own small workspace, pnpm stops after the install, and Unity's native first
+launch is still to be measured.
+
 - The Unity worktree opened after 1 import instead of 56,961. The Rust
   worktree compiled the workspace's own 22 packages instead of 581.
-- On macOS, a 47 GiB Unity project: a worktree in 15 s (49 s natively),
-  taking 110 MiB with its `Library/` (8.4 GiB natively, without one).
 - Merging gives the same commits as with native worktrees, to the commit id.
-- Not faster: on NTFS, pnpm's install takes as long as natively.
+- Not faster: pnpm's install takes as long as natively, on both systems.
   `node_modules/` stays behind, since pnpm installs from a store shared between
   projects and there is little to save.
 
