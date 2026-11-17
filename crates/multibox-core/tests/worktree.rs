@@ -467,6 +467,58 @@ fn remove_respects_locks() {
     purge_trash(&outcome.trash.unwrap()).unwrap();
 }
 
+/// A worktree kept inside the main one, as `.cindy-worktrees/` keeps them,
+/// caught while another tool is deleting it: its `.git` is already gone, so
+/// git walks up to the main worktree. That one has its editor open and work
+/// of its own, neither of which may be reported as the worktree's.
+fn worktree_without_its_git() -> (TempDir, PathBuf, PathBuf) {
+    let (temp, repo) = unity_repo();
+    write(&repo, ".git/info/exclude", "nested/\n");
+    add(&repo, &options("nested/wt", &["-b", "feat"]), &Silent).unwrap();
+    let wt = repo.join("nested/wt");
+    fs::remove_file(wt.join(".git")).unwrap();
+    write(
+        &repo,
+        "client/Library/EditorInstance.json",
+        &format!("{{\"process_id\" : {}}}\n", std::process::id()),
+    );
+    write(
+        &repo,
+        "client/Assets/a.txt",
+        "the main worktree's own work\n",
+    );
+    (temp, repo, wt)
+}
+
+#[test]
+fn remove_does_not_take_a_worktree_without_its_git_for_the_main_one() {
+    let (_temp, repo, wt) = worktree_without_its_git();
+    for force in [0, 1] {
+        let err = remove(&repo, &removal("nested/wt", force))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("lost its .git"), "force {force}: {err}");
+    }
+    assert!(wt.join("client/Assets/a.txt").exists(), "left as it was");
+    assert_eq!(
+        fs::read_to_string(repo.join("client/Assets/a.txt")).unwrap(),
+        "the main worktree's own work\n"
+    );
+}
+
+#[test]
+fn finish_does_not_take_a_worktree_without_its_git_for_the_main_one() {
+    let (_temp, repo, wt) = worktree_without_its_git();
+    let options = FinishOptions {
+        path: "nested/wt".to_owned(),
+        keep_branch: false,
+        merge_args: Vec::new(),
+    };
+    let err = finish(&repo, &options).unwrap_err().to_string();
+    assert!(err.contains("lost its .git"), "{err}");
+    assert!(wt.join("client/Assets/a.txt").exists(), "left as it was");
+}
+
 #[test]
 fn purge_refuses_anything_that_is_not_trash() {
     let (_temp, repo) = unity_repo();

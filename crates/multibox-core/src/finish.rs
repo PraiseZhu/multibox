@@ -2,7 +2,9 @@ use crate::adapter;
 use crate::config::Config;
 use crate::git::{self, Repo};
 use crate::index::Index;
-use crate::remove::{RemoveOptions, RemoveOutcome, refuse_if_editor_open, remove};
+use crate::remove::{
+    RemoveOptions, RemoveOutcome, discover_worktree, refuse_if_editor_open, remove, same_path,
+};
 use crate::{Error, Result};
 use std::path::Path;
 
@@ -74,7 +76,14 @@ pub fn finish(cwd: &Path, options: &FinishOptions) -> Result<FinishOutcome> {
             options.path
         )));
     }
-    let task = Repo::discover(&task_dir)?;
+    let listed = git::worktrees(cwd)?
+        .iter()
+        .any(|info| same_path(&info.path, &task_dir));
+    let task = if listed {
+        discover_worktree(&task_dir, &options.path)?
+    } else {
+        Repo::discover(&task_dir)?
+    };
     // Do this before merging as well as in remove: an active agent must not
     // have its branch merged and then discover that cleanup was refused.
     crate::cindy::refuse_if_in_use(&task.worktree)?;

@@ -21,11 +21,30 @@ pub struct RemoveOutcome {
     pub trash: Option<PathBuf>,
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     match (fs::canonicalize(a), fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
+}
+
+/// The repository of a directory git lists as a worktree.
+///
+/// `git rev-parse` walks up from a directory without a `.git`, so a worktree
+/// whose `.git` is gone, typically while another tool is deleting it, reads as
+/// whatever repository contains it. For a worktree kept inside the main one,
+/// such as `.cindy-worktrees/feat`, that is the main worktree, whose editor
+/// and changes would then be reported as this worktree's.
+pub(crate) fn discover_worktree(dir: &Path, shown: &str) -> Result<Repo> {
+    let repo = Repo::discover(dir)?;
+    if !same_path(&repo.worktree, dir) {
+        return Err(Error::new(format!(
+            "'{shown}' has lost its .git, so git no longer sees a working tree there; \
+             if no other tool is deleting it, check what is left in it, \
+             then delete it and run `git worktree prune`"
+        )));
+    }
+    Ok(repo)
 }
 
 pub(crate) fn refuse_if_editor_open(repo: &Repo) -> Result<()> {
@@ -94,7 +113,7 @@ pub fn remove(cwd: &Path, options: &RemoveOptions) -> Result<RemoveOutcome> {
         )));
     }
 
-    let repo = Repo::discover(&target)?;
+    let repo = discover_worktree(&target, &options.path)?;
     if options.force == 0 {
         refuse_if_editor_open(&repo)?;
         let dirty = git::output(
