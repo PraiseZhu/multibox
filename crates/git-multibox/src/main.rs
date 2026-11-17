@@ -41,11 +41,13 @@ Multibox-specific options for add:
 Options for remove:
     --wait              delete in the foreground instead of in the background
     --json              print the result as JSON on stdout
+    Cindy runtime leases prevent removal even with --force.
 
 finish merges the worktree's branch into the branch checked out here, then
 removes the worktree and the merged branch. It stops before changing anything
-if work is uncommitted or an editor has the worktree open, and leaves a merge
-that hits conflicts in progress, as git does. Run it again once committed.
+if work is uncommitted, an editor has the worktree open, or a Cindy session
+still uses it. A merge that hits conflicts is left in progress, as git does.
+Run it again once committed.
     --keep-branch       keep the branch after merging it
     --wait              delete in the foreground instead of in the background
     --json              print the result as JSON on stdout

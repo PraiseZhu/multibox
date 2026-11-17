@@ -7,6 +7,7 @@
 
 pub mod adapter;
 mod add;
+mod cindy;
 mod config;
 mod doctor;
 mod finish;
@@ -20,6 +21,7 @@ mod rules;
 mod setup;
 
 pub use add::{AddOptions, AddOutcome, Mode, Observer, add};
+pub use cindy::cindy_worktree_in_use;
 pub use config::{CONFIG_FILE, Config, LargeCaches};
 pub use doctor::{Check, Diagnosis, Level, diagnose};
 pub use finish::{FinishOptions, FinishOutcome, finish};

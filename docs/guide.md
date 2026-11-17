@@ -281,6 +281,13 @@ testing:
   `git multibox add` reports the variable that prevents this, and
   `eval "$(git multibox env)"` sets it. Passing `--project-path` works too.
 - **`remove` refuses while an editor has the worktree open.** `--force` overrides.
+- **A Cindy runtime lease prevents removal and finish.** Stop the session and
+  wait for Cindy to release the lease first. This also applies to `--force` and
+  to the UI's cleanup of already merged worktrees. Leases are read across local
+  Cindy profiles (including development and Host profiles), the older shared
+  lease directory, and `XDT_USER_DATA_DIR` / `CINDY_HOST_DATA_DIR` when set.
+  Unreadable lease evidence stays protective. Multibox does not remove leases
+  or waive them based on a PID or age: a detached child may still be writing.
 
 ## As a library
 

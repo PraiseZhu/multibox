@@ -67,6 +67,7 @@ fn detach_contents(target: &Path, trash: &Path) -> std::io::Result<()> {
 
 /// Removes a linked worktree with the semantics of `git worktree remove`:
 /// a dirty or locked worktree needs `--force`, the main worktree is refused.
+/// A Cindy runtime lease always prevents removal, including with `--force`.
 ///
 /// Returns right after detaching the contents. The caller decides how to run
 /// [`purge_trash`] on [`RemoveOutcome::trash`], typically in a background process.
@@ -118,6 +119,9 @@ pub fn remove(cwd: &Path, options: &RemoveOptions) -> Result<RemoveOutcome> {
     // Submodules need git's own checks, and the fast path cannot help anyway.
     let has_submodules = repo.git_dir.join("modules").exists();
     let trash = trash_path(&target).filter(|_| !has_submodules);
+    // Re-read runtime evidence immediately before changing the directory. This
+    // also applies to --force: it only authorizes discarding local changes.
+    crate::cindy::refuse_if_in_use(&target)?;
     if let Some(trash) = &trash {
         if detach_contents(&target, trash).is_ok() {
             if let Err(err) = git::quiet(cwd, &args) {
@@ -133,6 +137,7 @@ pub fn remove(cwd: &Path, options: &RemoveOptions) -> Result<RemoveOutcome> {
     }
 
     // Something inside is held open, or the fast path does not apply.
+    crate::cindy::refuse_if_in_use(&target)?;
     git::quiet(cwd, &args)?;
     Ok(RemoveOutcome {
         path: target,

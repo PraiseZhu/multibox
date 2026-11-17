@@ -75,6 +75,9 @@ pub fn finish(cwd: &Path, options: &FinishOptions) -> Result<FinishOutcome> {
         )));
     }
     let task = Repo::discover(&task_dir)?;
+    // Do this before merging as well as in remove: an active agent must not
+    // have its branch merged and then discover that cleanup was refused.
+    crate::cindy::refuse_if_in_use(&task.worktree)?;
     if task.git_dir == target.git_dir {
         return Err(Error::new(
             "run finish from the worktree that should receive the branch",

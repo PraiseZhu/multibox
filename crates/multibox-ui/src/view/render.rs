@@ -511,6 +511,21 @@ impl MultiboxApp {
         let Some(details) = details else {
             return marks;
         };
+        if details.cindy_in_use {
+            marks.push(Mark {
+                icon: IconName::AppWindow,
+                color: palette.warning,
+                label: "Cindy 正在使用".to_owned(),
+                hint: "Cindy 会话正在使用这个工作区，停止会话并等待任务退出后才能清理".to_owned(),
+            });
+        } else if let Some(error) = &details.cindy_error {
+            marks.push(Mark {
+                icon: IconName::TriangleAlert,
+                color: palette.warning,
+                label: "无法确认 Cindy 占用".to_owned(),
+                hint: format!("暂不能清理：{error}"),
+            });
+        }
         if let Some(editor) = &details.editor {
             marks.push(Mark {
                 icon: IconName::AppWindow,
@@ -1374,13 +1389,9 @@ impl MultiboxApp {
         let waiting = busy.is_some() || self.global_busy.is_some();
         let dirty = details.is_some_and(Details::dirty);
         let ahead = details.and_then(|details| details.ahead).unwrap_or(0);
-        let blocked: Option<String> = if let Some(editor) = details.and_then(|d| d.editor.clone()) {
-            Some(format!("{editor} 开着，先关掉它"))
-        } else if worktree.locked {
-            Some("已锁定，先解锁".to_owned())
-        } else {
-            None
-        };
+        let blocked = details
+            .and_then(Details::removal_blocked)
+            .or_else(|| worktree.locked.then(|| "已锁定，先解锁".to_owned()));
 
         let mut row = h_flex().gap(px(8.)).flex_wrap();
         let linked = !worktree.is_main && worktree.exists;
@@ -1865,6 +1876,18 @@ impl MultiboxApp {
                     palette.danger,
                     "有一次合并没做完".to_owned(),
                     Some("解决冲突后提交，或者 git merge --abort".to_owned()),
+                ));
+            }
+            if details.cindy_in_use || details.cindy_error.is_some() {
+                git = git.child(fact(
+                    IconName::AppWindow,
+                    palette.warning,
+                    if details.cindy_in_use {
+                        "Cindy 会话正在使用".to_owned()
+                    } else {
+                        "无法确认 Cindy 会话占用".to_owned()
+                    },
+                    details.removal_blocked(),
                 ));
             }
             if let Some(editor) = &details.editor {

@@ -678,14 +678,7 @@ impl MultiboxApp {
         let Some(details) = self.details.get(&worktree.path) else {
             return false;
         };
-        !worktree.is_main
-            && worktree.exists
-            && !worktree.locked
-            && worktree.branch.is_some()
-            && details.ahead == Some(0)
-            && !details.dirty()
-            && details.editor.is_none()
-            && !details.merge_in_progress
+        details.cleanable(worktree)
     }
 
     fn cleanup(&self) -> Cleanup {

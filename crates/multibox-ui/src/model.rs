@@ -136,6 +136,8 @@ pub struct Details {
     pub last_commit: Option<Commit>,
     pub engines: Vec<String>,
     pub editor: Option<String>,
+    pub cindy_in_use: bool,
+    pub cindy_error: Option<String>,
     pub filesystem: Option<String>,
     pub reflink: bool,
     pub merge_in_progress: bool,
@@ -149,6 +151,29 @@ impl Details {
     pub fn dirty(&self) -> bool {
         self.changed + self.untracked > 0
     }
+
+    pub fn removal_blocked(&self) -> Option<String> {
+        if self.cindy_in_use {
+            Some("Cindy 会话正在使用这个工作区，请先停止会话并等待任务退出".to_owned())
+        } else if let Some(error) = &self.cindy_error {
+            Some(format!("无法确认 Cindy 会话占用，暂不能清理：{error}"))
+        } else {
+            self.editor
+                .as_ref()
+                .map(|editor| format!("{editor} 开着，先关掉它"))
+        }
+    }
+
+    pub fn cleanable(&self, worktree: &Worktree) -> bool {
+        !worktree.is_main
+            && worktree.exists
+            && !worktree.locked
+            && worktree.branch.is_some()
+            && self.ahead == Some(0)
+            && !self.dirty()
+            && self.removal_blocked().is_none()
+            && !self.merge_in_progress
+    }
 }
 
 pub fn details(worktree: &Worktree, main: &Path, into: Option<&str>) -> Details {
@@ -157,6 +182,10 @@ pub fn details(worktree: &Worktree, main: &Path, into: Option<&str>) -> Details 
         return details;
     }
     let path = &worktree.path;
+    match multibox_core::cindy_worktree_in_use(path) {
+        Ok(in_use) => details.cindy_in_use = in_use,
+        Err(err) => details.cindy_error = Some(err.to_string()),
+    }
 
     match git::output(path, &["status", "--porcelain", "--ignore-submodules=none"]) {
         Ok(status) => {

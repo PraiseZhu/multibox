@@ -321,6 +321,16 @@ mod tests {
         let entry = worktree(&snapshot, "done").unwrap();
         let details = model::details(entry, &snapshot.main, snapshot.into.as_deref());
         assert_eq!(details.ahead, Some(0));
+        assert!(details.cleanable(entry));
+
+        let mut occupied = details.clone();
+        occupied.cindy_in_use = true;
+        assert!(!occupied.cleanable(entry));
+        assert!(occupied.removal_blocked().unwrap().contains("Cindy"));
+        occupied.cindy_in_use = false;
+        occupied.cindy_error = Some("lease cannot be read".to_owned());
+        assert!(!occupied.cleanable(entry));
+        assert!(occupied.removal_blocked().is_some());
 
         let message = clean_merged(&main, &done, Some("done")).unwrap();
         assert!(message.contains("done"), "{message}");
