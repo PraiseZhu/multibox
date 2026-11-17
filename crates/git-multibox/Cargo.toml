@@ -15,6 +15,10 @@ path = "src/main.rs"
 multibox-clone.workspace = true
 multibox-core.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
+sha2.workspace = true
 tempfile.workspace = true
+semver = "1"
+self-replace = "1.5"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

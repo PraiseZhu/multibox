@@ -102,6 +102,12 @@ PATH. Or build it with Rust:
 cargo install --locked --git https://github.com/fpgames/multibox git-multibox multibox-ui
 ```
 
+After installation, run `git multibox update` from any directory to update both
+programs to the latest stable release, or `git multibox update --check` just to
+check. It verifies `SHA256SUMS` and updates the directory containing the running
+command. Close the window first on Windows. Downloads use the system's `curl`
+and `tar`; Rust is not needed.
+
 ## Use it
 
 Nothing to configure. In any repository:

@@ -3,6 +3,8 @@
 //! Arguments mirror `git worktree`. `add` and `remove` are accelerated, and
 //! every other subcommand is handed to git unchanged.
 
+mod update;
+
 use multibox_core::{
     AddOptions, CONFIG_FILE, Config, FinishOptions, FinishOutcome, InitOptions, InitOutcome, Level,
     MigrateOptions, Mode, Mount, Observer, Progress, RemoveOptions, SetupOptions, adapter, add,
@@ -22,6 +24,7 @@ usage: git multibox add [<options>] <path> [<commit-ish>]
        git multibox finish [--keep-branch] [--wait] [--json] <worktree> [-- <merge options>]
        git multibox <list|lock|move|prune|repair|unlock> ...
        git multibox ui [<path>]
+       git multibox update [--check] [--force]
        git multibox init [--project <path>] [--to <path>] [--exclude <path>]... [--dry-run]
        git multibox doctor [--json]
        git multibox env [--json]
@@ -55,6 +58,12 @@ Run it again once committed.
 ui opens a window on the repository at <path>, the current directory by
 default: every worktree with the disk it takes, and buttons to finish, remove,
 lock and clean them up. The terminal is free again right away.
+
+update installs the latest GitHub release beside the running command, including
+the window. It checks SHA256SUMS before replacing anything. No repository is
+needed. Downloads require curl and tar (included with Windows and macOS).
+    --check             report the latest version without installing it
+    --force             reinstall even when this version is already up to date
 
 Every option of `git worktree add` is accepted and passed through.
 
@@ -763,8 +772,8 @@ fn real_directory(cwd: PathBuf) -> PathBuf {
 }
 
 /// Commands this program implements itself; git answers `-h` for the rest.
-const OWN_COMMANDS: [&str; 9] = [
-    "add", "remove", "finish", "doctor", "env", "setup", "init", "migrate", "ui",
+const OWN_COMMANDS: [&str; 10] = [
+    "add", "remove", "finish", "doctor", "env", "setup", "init", "migrate", "ui", "update",
 ];
 
 /// `-h` or `--help` among a command's own options, before any `--`.
@@ -784,6 +793,9 @@ fn run() -> Result<ExitCode, String> {
     if OWN_COMMANDS.contains(&subcommand.as_str()) && asks_for_help(&args) {
         print!("{USAGE}");
         return Ok(ExitCode::SUCCESS);
+    }
+    if subcommand == "update" {
+        return update::run(&args);
     }
     let cwd = real_directory(std::env::current_dir().map_err(|err| err.to_string())?);
     match subcommand.as_str() {

@@ -77,6 +77,8 @@ curl -fsSL https://raw.githubusercontent.com/fpgames/multibox/main/install.sh | 
 cargo install --locked --git https://github.com/fpgames/multibox git-multibox multibox-ui
 ```
 
+之后可在任意目录运行 `git multibox update`，把命令行和管理器一起更新到最新正式版；`git multibox update --check` 只检查版本。更新会核对 `SHA256SUMS`，安装到当前命令所在的目录；Windows 上先关闭管理器。下载使用系统自带的 `curl` 和 `tar`，不需要安装 Rust。
+
 ## 用法
 
 不需要配置。在任意仓库里：

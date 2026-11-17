@@ -101,6 +101,17 @@ switches a project.
 `git multibox -h`, or `-h` after any command, prints the full usage.
 `git multibox --help` does not: git takes it as a request for a manual page.
 
+`git multibox update` installs the latest stable GitHub release of both programs
+in the directory containing the running command. It works outside repositories,
+uses the system's `curl` and `tar`, and verifies the archive against `SHA256SUMS`
+before changing any installed file. `--check` only reports versions; `--force`
+reinstalls the latest release even if it is not newer. Published binaries are
+available for Windows x64 and macOS Apple silicon / Intel; other platforms can
+still update using `cargo install`. Close the Multibox window first on Windows.
+Concurrent updates are refused, and a failed replacement restores the previous
+files. License notices are installed as `multibox-THIRD-PARTY-LICENSES.md` beside
+the programs. The command does not change PATH or use `MULTIBOX_INSTALL_DIR`.
+
 `add` accepts every `git worktree add` option, plus:
 
 | Option | Meaning |
