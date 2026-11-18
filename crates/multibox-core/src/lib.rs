@@ -9,6 +9,7 @@ pub mod adapter;
 mod add;
 mod cindy;
 mod config;
+pub mod disk;
 mod doctor;
 mod finish;
 pub mod git;
@@ -23,6 +24,10 @@ mod setup;
 pub use add::{AddOptions, AddOutcome, Mode, Observer, add};
 pub use cindy::cindy_worktree_in_use;
 pub use config::{CONFIG_FILE, Config, LargeCaches};
+pub use disk::{
+    DiskImage, DiskStatus, GrowPlan, KeptCheck, KeptOriginal, check_kept, delete_kept, disk_status,
+    grow, grow_enabled, kept_originals, plan_grow,
+};
 pub use doctor::{Check, Diagnosis, Level, diagnose};
 pub use finish::{FinishOptions, FinishOutcome, finish};
 pub use migrate::{

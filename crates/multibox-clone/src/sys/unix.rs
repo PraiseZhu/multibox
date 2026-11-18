@@ -149,6 +149,58 @@ pub fn volumes() -> Vec<Volume> {
     Vec::new()
 }
 
+/// Where the filesystem holding `path` is mounted.
+#[cfg(target_os = "macos")]
+fn mount_point(_path: &Path, info: &libc::statfs) -> String {
+    let name: Vec<u8> = info
+        .f_mntonname
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect();
+    String::from_utf8_lossy(&name).into_owned()
+}
+
+/// Where the filesystem holding `path` is mounted: the highest directory
+/// above it still on the same device.
+#[cfg(not(target_os = "macos"))]
+fn mount_point(path: &Path, _info: &libc::statfs) -> String {
+    let device = |path: &Path| fs::metadata(path).map(|meta| meta.dev()).ok();
+    let start = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let own = device(&start);
+    let mut top = start.as_path();
+    while let Some(parent) = top.parent() {
+        if device(parent) != own {
+            break;
+        }
+        top = parent;
+    }
+    top.display().to_string()
+}
+
+/// The volume holding `path`. Whether it clones is left to [`probe`], which
+/// tries it.
+// The widths of statfs's fields differ between targets.
+#[allow(clippy::unnecessary_cast)]
+pub fn volume_at(path: &Path) -> io::Result<Volume> {
+    let path = existing_ancestor(path);
+    let info = statfs(&path)?;
+    let block = info.f_bsize as u64;
+    Ok(Volume {
+        root: mount_point(&path, &info),
+        filesystem: filesystem_name(&info),
+        reflink: false,
+        free: info.f_bavail as u64 * block,
+        total: info.f_blocks as u64 * block,
+        fixed: true,
+    })
+}
+
+/// Volumes here live on disks the system manages, not in files Multibox made.
+pub fn backing_image(_path: &Path) -> io::Result<Option<PathBuf>> {
+    Ok(None)
+}
+
 /// Bytes available to the caller on the volume holding `path`.
 pub fn free_space(path: &Path) -> io::Result<u64> {
     let info = statfs(&existing_ancestor(path))?;

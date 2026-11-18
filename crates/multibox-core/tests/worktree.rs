@@ -857,6 +857,15 @@ fn init_copies_while_the_editor_is_open_and_finishes_once_it_closes() {
         } => {
             assert!(updated >= 1);
             assert!(kept_at.join("README.md").exists(), "original kept");
+            let kept = multibox_core::kept_originals(&repo);
+            assert_eq!(kept.len(), 1, "the move remembers what it kept");
+            assert_eq!(
+                fs::canonicalize(&kept[0].path).unwrap(),
+                fs::canonicalize(&kept_at).unwrap()
+            );
+            assert!(kept[0].bytes.unwrap_or(0) > 0);
+            let check = multibox_core::check_kept(&repo, &kept_at).unwrap();
+            assert!(check.is_clear(), "the original matches: {check:?}");
         }
         other => panic!("expected the switch, got {other:?}"),
     }

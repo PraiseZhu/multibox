@@ -72,12 +72,29 @@ struct Cleanup {
     merged: Vec<Worktree>,
     trash: usize,
     stale: usize,
+    /// Originals a move kept that hold nothing the project lacks.
+    kept: Vec<PathBuf>,
     bytes: u64,
 }
 
 impl Cleanup {
     fn is_empty(&self) -> bool {
-        self.merged.is_empty() && self.trash == 0 && self.stale == 0
+        self.merged.is_empty() && self.trash == 0 && self.stale == 0 && self.kept.is_empty()
+    }
+}
+
+/// What the window has found out about an original a move kept: slow to
+/// learn, so learned once while the window is open.
+#[derive(Clone, Default)]
+struct KeptFacts {
+    bytes: Option<u64>,
+    check: Option<Result<multibox_core::KeptCheck, String>>,
+}
+
+impl KeptFacts {
+    /// Deleting it loses nothing, as far as the comparison found.
+    fn clear(&self) -> bool {
+        matches!(&self.check, Some(Ok(check)) if check.is_clear())
     }
 }
 
@@ -92,6 +109,9 @@ pub struct MultiboxApp {
     scanning: HashMap<PathBuf, Arc<ScanProgress>>,
     scan_errors: HashMap<PathBuf, String>,
     trash_size: Option<u64>,
+    kept_facts: HashMap<PathBuf, KeptFacts>,
+    /// The inspector shows the disk rather than the selected worktree.
+    disk_open: bool,
     /// What the measured worktrees take, hard-linked data counted once.
     dedup: usage::Totals,
     selected: Option<PathBuf>,
@@ -142,6 +162,8 @@ impl MultiboxApp {
             scanning: HashMap::new(),
             scan_errors: HashMap::new(),
             trash_size: None,
+            kept_facts: HashMap::new(),
+            disk_open: false,
             dedup: usage::Totals::default(),
             selected: None,
             busy: HashMap::new(),
@@ -264,6 +286,8 @@ impl MultiboxApp {
                     let present: HashSet<&PathBuf> =
                         snapshot.worktrees.iter().map(|w| &w.path).collect();
                     this.details.retain(|path, _| present.contains(path));
+                    this.kept_facts
+                        .retain(|path, _| snapshot.kept.iter().any(|kept| &kept.path == path));
                     this.usage.retain(|path, _| present.contains(path));
                     this.busy.retain(|path, _| present.contains(path));
                     this.scan_errors.clear();
@@ -404,6 +428,45 @@ impl MultiboxApp {
             });
         })
         .detach();
+        self.learn_kept(snapshot, cx);
+    }
+
+    /// Sizes each original a move kept and compares it with the project, once:
+    /// both read a whole project, so a refresh does not repeat them.
+    fn learn_kept(&mut self, snapshot: &Snapshot, cx: &mut Context<Self>) {
+        for kept in &snapshot.kept {
+            if self.kept_facts.contains_key(&kept.path) {
+                continue;
+            }
+            self.kept_facts
+                .insert(kept.path.clone(), KeptFacts::default());
+            let (main, path) = (snapshot.main.clone(), kept.path.clone());
+            cx.spawn(async move |this, cx| {
+                let size_of = path.clone();
+                let bytes = cx
+                    .background_spawn(async move { usage::tree_size(&size_of) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(facts) = this.kept_facts.get_mut(&path) {
+                        facts.bytes = Some(bytes);
+                        cx.notify();
+                    }
+                });
+                let compare = path.clone();
+                let check = cx
+                    .background_spawn(async move {
+                        multibox_core::check_kept(&main, &compare).map_err(|err| err.to_string())
+                    })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(facts) = this.kept_facts.get_mut(&path) {
+                        facts.check = Some(check);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
     }
 
     fn recompute_totals(&mut self) {
@@ -456,6 +519,8 @@ impl MultiboxApp {
         self.usage.clear();
         self.scan_errors.clear();
         self.trash_size = None;
+        self.kept_facts.clear();
+        self.disk_open = false;
         self.selected = None;
         self.refreshed_at = None;
         self.refresh(Measure::Changed, cx);
@@ -687,6 +752,7 @@ impl MultiboxApp {
                 merged: Vec::new(),
                 trash: 0,
                 stale: 0,
+                kept: Vec::new(),
                 bytes: 0,
             };
         };
@@ -700,10 +766,21 @@ impl MultiboxApp {
             .iter()
             .filter_map(|worktree| self.freed(&worktree.path))
             .sum();
+        let kept: Vec<(PathBuf, u64)> = snapshot
+            .kept
+            .iter()
+            .filter_map(|kept| {
+                let facts = self.kept_facts.get(&kept.path)?;
+                facts.clear().then_some((kept.path.clone(), facts.bytes?))
+            })
+            .collect();
         Cleanup {
             trash: snapshot.trash.len(),
             stale: snapshot.worktrees.iter().filter(|w| w.prunable).count(),
-            bytes: freed + self.trash_size.unwrap_or(0),
+            bytes: freed
+                + self.trash_size.unwrap_or(0)
+                + kept.iter().map(|(_, bytes)| bytes).sum::<u64>(),
+            kept: kept.into_iter().map(|(path, _)| path).collect(),
             merged,
         }
     }
@@ -733,6 +810,18 @@ impl MultiboxApp {
         }
         if cleanup.stale > 0 {
             lines.push(format!("· {} 条目录已经不在的工作区记录", cleanup.stale));
+        }
+        for kept in &cleanup.kept {
+            let bytes = self
+                .kept_facts
+                .get(kept)
+                .and_then(|facts| facts.bytes)
+                .unwrap_or(0);
+            lines.push(format!(
+                "· 迁移留下的原工程 {}：和现在的工程一致，{}",
+                kept.display(),
+                format::bytes(bytes)
+            ));
         }
         let description: SharedString = lines.join("\n").into();
         let title: SharedString = format!("清理 {}？", format::bytes(cleanup.bytes)).into();
@@ -785,6 +874,12 @@ impl MultiboxApp {
                     match ops::prune(&main) {
                         Ok(_) => done.push(format!("{} 条失效记录", cleanup.stale)),
                         Err(err) => failed.push(format!("失效记录：{err}")),
+                    }
+                }
+                for kept in &cleanup.kept {
+                    match ops::delete_kept(&main, kept, false) {
+                        Ok(_) => done.push(format!("原工程 {}", kept.display())),
+                        Err(err) => failed.push(format!("{}：{err}", kept.display())),
                     }
                 }
                 let message = if done.is_empty() {
@@ -970,6 +1065,237 @@ impl MultiboxApp {
             let _ = window.update(cx, |_, window, cx| window.push_notification(note, cx));
         })
         .detach();
+    }
+
+    // ---- the disk ------------------------------------------------------
+
+    fn toggle_disk(&mut self, cx: &mut Context<Self>) {
+        self.disk_open = !self.disk_open;
+        cx.notify();
+    }
+
+    fn confirm_delete_kept(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let facts = self.kept_facts.get(&path).cloned().unwrap_or_default();
+        let size = facts
+            .bytes
+            .map(|bytes| format!("，腾出约 {}", format::bytes(bytes)))
+            .unwrap_or_default();
+        let mut lines = vec![format!("{} 会从磁盘上删除{size}。", path.display())];
+        let force = match &facts.check {
+            Some(Ok(check)) => match ops::kept_problems(check) {
+                Some(problems) => {
+                    lines.push(format!("{problems}，删掉后找不回来："));
+                    lines.extend(
+                        check
+                            .missing
+                            .iter()
+                            .chain(&check.differing)
+                            .take(6)
+                            .map(|name| format!("· {name}")),
+                    );
+                    true
+                }
+                None => {
+                    lines.push("它的提交和改动都已经在现在的工程里，删掉不会丢东西。".to_owned());
+                    false
+                }
+            },
+            Some(Err(err)) => {
+                lines.push(format!("没能和现在的工程比较：{err}"));
+                true
+            }
+            None => {
+                lines.push("删除前会先和现在的工程比较，有没带过去的东西就不删。".to_owned());
+                false
+            }
+        };
+        let description: SharedString = lines.join("\n").into();
+        let view = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (view, path) = (view.clone(), path.clone());
+            alert
+                .title("删除迁移留下的原工程？")
+                .description(description.clone())
+                .confirm()
+                .ok_text(if force { "仍然删除" } else { "删除" })
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text("取消")
+                .on_ok(move |_, _, cx| {
+                    let path = path.clone();
+                    view.update(cx, |this, cx| this.delete_kept(path, force, cx));
+                    true
+                })
+        });
+    }
+
+    fn delete_kept(&mut self, path: PathBuf, force: bool, cx: &mut Context<Self>) {
+        let Some(main) = self.main_path() else {
+            return;
+        };
+        self.run(
+            None,
+            "删除原工程",
+            move || ops::delete_kept(&main, &path, force).map(Report::Success),
+            cx,
+        );
+    }
+
+    /// Programs this window knows to hold the volume: editors and Cindy
+    /// sessions in the worktrees on it.
+    fn holding_volume(&self, root: &str) -> Vec<String> {
+        let Some(snapshot) = &self.snapshot else {
+            return Vec::new();
+        };
+        let root = root.replace('\\', "/").to_lowercase();
+        snapshot
+            .worktrees
+            .iter()
+            .filter(|worktree| {
+                worktree
+                    .path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_lowercase()
+                    .starts_with(&root)
+            })
+            .filter_map(|worktree| {
+                let details = self.details.get(&worktree.path)?;
+                let what = if details.cindy_in_use {
+                    "Cindy 会话".to_owned()
+                } else {
+                    details.editor.clone()?
+                };
+                Some(format!("{}：{what}", worktree.name))
+            })
+            .collect()
+    }
+
+    fn open_grow_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(status) = self.snapshot.as_ref().and_then(|s| s.disk.clone()) else {
+            return;
+        };
+        let Some(image) = status.image.clone() else {
+            return;
+        };
+        const GIB: u64 = 1 << 30;
+        let current = status.volume.total.div_ceil(GIB);
+        // Half as much again, in steps of 128 GiB.
+        let suggestion = (current * 3 / 2).next_multiple_of(128).max(current + 128);
+        let root = status.volume.root.trim_end_matches(['\\', '/']).to_owned();
+        let host = image.host.clone();
+        let size_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("GiB")
+                .default_value(suggestion.to_string())
+        });
+        let holding = self.holding_volume(&status.volume.root);
+        let view = cx.entity();
+        let first = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false) {
+                size_input.read(cx).focus_handle(cx).focus(window, cx);
+            }
+            let palette = Palette::current(cx);
+            let grow = {
+                let (view, size_input) = (view.clone(), size_input.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
+                    let text = size_input.read(cx).value().trim().to_owned();
+                    let Ok(size) = text.trim_end_matches(|c: char| c.is_ascii_alphabetic()).trim().parse::<u64>() else {
+                        window.push_notification(Notification::warning("填一个以 GiB 为单位的整数"), cx);
+                        return;
+                    };
+                    if size <= current {
+                        window.push_notification(
+                            Notification::warning(format!("要比现在的 {current} GiB 大")),
+                            cx,
+                        );
+                        return;
+                    }
+                    view.update(cx, |this, cx| this.grow(size, cx));
+                    window.close_dialog(cx);
+                }
+            };
+            let note = |words: String, color| {
+                div()
+                    .text_size(px(12.))
+                    .line_height(px(18.))
+                    .text_color(color)
+                    .child(words)
+            };
+            let mut body = v_flex()
+                .pt(px(8.))
+                .gap(px(10.))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(format!("新的上限（GiB），现在约 {current} GiB")),
+                )
+                .child(Input::new(&size_input))
+                .child(note(
+                    match &host {
+                        Some(host) => format!(
+                            "虚拟盘文件 {} 按需增长，调大上限不会马上占用空间。{} 现在剩 {}，文件已占 {}。",
+                            image.file.display(),
+                            host.root.trim_end_matches(['\\', '/']),
+                            format::bytes(host.free),
+                            format::bytes(image.file_bytes)
+                        ),
+                        None => format!(
+                            "虚拟盘文件 {} 按需增长，调大上限不会马上占用空间。",
+                            image.file.display()
+                        ),
+                    },
+                    palette.ink3,
+                ))
+                .child(note(
+                    format!(
+                        "需要管理员确认。扩容时 {root} 会卸下几秒：先关掉在 {root} 上开着文件或文件夹的程序，比如编辑器、IDE、终端和 Cindy 会话。只要还有程序占用，扩容会直接停下，什么都不改。"
+                    ),
+                    palette.ink2,
+                ));
+            if !holding.is_empty() {
+                body = body.child(note(
+                    format!("这些还开着：{}", holding.join("；")),
+                    palette.warning,
+                ));
+            }
+            dialog
+                .title(format!("扩容 {root}"))
+                .width(px(480.))
+                .child(body)
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("grow-cancel")
+                                .label("取消")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("grow-ok")
+                                .primary()
+                                .icon(IconName::HardDrive)
+                                .label("扩容")
+                                .on_click(grow),
+                        ),
+                )
+        });
+    }
+
+    fn grow(&mut self, size_gib: u64, cx: &mut Context<Self>) {
+        let Some(main) = self.main_path() else {
+            return;
+        };
+        // A measurement holds folders on the volume open.
+        for progress in self.scanning.values() {
+            progress.cancel.store(true, Ordering::Relaxed);
+        }
+        self.run(
+            None,
+            "扩容",
+            move || ops::grow(&main, size_gib).map(Report::Success),
+            cx,
+        );
     }
 
     fn copy_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {

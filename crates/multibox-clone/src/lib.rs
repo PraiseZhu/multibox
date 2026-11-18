@@ -28,7 +28,9 @@ pub use scan::{Decision, DirEntry, FileEntry, LinkEntry, Manifest, ScanRequest, 
 pub use sync::{SyncReport, sync};
 #[cfg(windows)]
 pub use sys::make_junction;
-pub use sys::{Capability, free_space, no_console_window, os_build, probe, volumes};
+pub use sys::{
+    Capability, backing_image, free_space, no_console_window, os_build, probe, volume_at, volumes,
+};
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;

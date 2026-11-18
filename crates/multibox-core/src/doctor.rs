@@ -109,6 +109,21 @@ fn check_repository(report: &mut Diagnosis, cwd: &Path) {
         }
     }
 
+    for kept in crate::disk::kept_originals(&repo.worktree) {
+        let size = kept
+            .bytes
+            .map(|bytes| format!(" ({})", crate::disk::size_text(bytes)))
+            .unwrap_or_default();
+        report.push(
+            "original",
+            Level::Info,
+            format!(
+                "a move kept the original at {}{size}; once the project works from its new place, `git multibox disk --delete-original` frees it",
+                kept.path.display()
+            ),
+        );
+    }
+
     match probe(&repo.worktree, &repo.worktree) {
         Ok(capability) => {
             let detail = format!(

@@ -8,8 +8,9 @@ mod update;
 use multibox_core::{
     AddOptions, CONFIG_FILE, Config, FinishOptions, FinishOutcome, InitOptions, InitOutcome, Level,
     MigrateOptions, Mode, Mount, Observer, Progress, RemoveOptions, SetupOptions, adapter, add,
-    diagnose, finish, git, init, migrate, plan_setup, purge_trash, remove, run_setup,
-    spawn_detached, sweep_trash, switch,
+    check_kept, delete_kept, diagnose, disk::size_text, disk_status, finish, git, grow,
+    grow_enabled, init, kept_originals, migrate, plan_grow, plan_setup, purge_trash, remove,
+    run_setup, spawn_detached, sweep_trash, switch,
 };
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -27,6 +28,7 @@ usage: git multibox add [<options>] <path> [<commit-ish>]
        git multibox update [--check] [--force]
        git multibox init [--project <path>] [--to <path>] [--exclude <path>]... [--dry-run]
        git multibox doctor [--json]
+       git multibox disk [--json] | disk --delete-original [--force]
        git multibox env [--json]
        git multibox setup [--vhdx <file>] [--size <GiB>] [--letter <X> | --folder <dir>] [--dry-run]
        git multibox migrate <destination> [--exclude <path>]... [--dry-run]
@@ -58,6 +60,12 @@ Run it again once committed.
 ui opens a window on the repository at <path>, the current directory by
 default: every worktree with the disk it takes, and buttons to finish, remove,
 lock and clean them up. The terminal is free again right away.
+
+disk shows the volume the repository is on, the virtual disk file a Dev Drive
+lives in and how much the disk holding that file has left, and any original a
+move with init kept, compared with the project. --delete-original deletes that
+original unless it holds commits or changes the project lacks; --force deletes
+it anyway.
 
 update installs the latest GitHub release beside the running command, including
 the window. It checks SHA256SUMS before replacing anything. No repository is
@@ -137,6 +145,251 @@ fn take_value(args: &mut std::vec::IntoIter<String>, flag: &str) -> Result<Strin
     args.next().ok_or_else(|| format!("{flag} needs a value"))
 }
 
+fn volume_json(volume: &multibox_core::Volume) -> serde_json::Value {
+    serde_json::json!({
+        "root": volume.root,
+        "filesystem": volume.filesystem,
+        "free": volume.free,
+        "total": volume.total,
+    })
+}
+
+/// Deletes an original a move of the project at `project` kept, after
+/// checking that it holds nothing the project lacks, unless `force`.
+fn delete_original(project: &Path, kept: &Path, force: bool) -> Result<(), String> {
+    if !force {
+        let check = check_kept(project, kept).map_err(|err| err.to_string())?;
+        if !check.is_clear() {
+            let mut message = format!(
+                "{} holds what the project lacks, so it was not deleted:",
+                kept.display()
+            );
+            for name in &check.missing {
+                message += &format!("\n  commit of {name}");
+            }
+            for name in &check.differing {
+                message += &format!("\n  changed since the move: {name}");
+            }
+            message += "\nBring that across first, or pass --force to delete it anyway.";
+            return Err(message);
+        }
+    }
+    eprintln!(
+        "multibox: deleting {}; a large project takes a few minutes",
+        kept.display()
+    );
+    let report = delete_kept(project, kept).map_err(|err| err.to_string())?;
+    match report.failures.first() {
+        Some(first) => Err(format!(
+            "{} file(s) in {} could not be deleted, first: {first}",
+            report.failures.len(),
+            kept.display()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// After a move: says what was kept and why, and when someone is at the
+/// terminal asks whether to delete it now. Without an answer it stays.
+fn offer_to_delete_original(project: &Path, kept_at: &Path, bytes: u64) {
+    use std::io::{BufRead, IsTerminal, Write};
+    println!(
+        "The original is kept at {} ({}).\nIt matches the project now, and is your way back if the project does not work\nfrom its new place, for instance if the editor will not open it there.",
+        kept_at.display(),
+        size_text(bytes)
+    );
+    let later =
+        "Delete it later with `git multibox disk --delete-original`, or from `git multibox ui`.";
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        println!("{later}");
+        return;
+    }
+    eprint!("Delete the original now? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut answer);
+    if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+        println!("Kept. {later}");
+        return;
+    }
+    match delete_original(project, kept_at, false) {
+        Ok(()) => println!("Deleted the original; {} is free again.", size_text(bytes)),
+        Err(message) => eprintln!("{message}"),
+    }
+}
+
+/// One line while an original a move kept is still on disk.
+fn remind_of_originals(cwd: &Path, terminal: &Terminal) {
+    for kept in kept_originals(cwd) {
+        terminal.note(&format!(
+            "the original a move kept is still at {}{}; once the project works from its new place, `git multibox disk --delete-original` frees it",
+            kept.path.display(),
+            kept.bytes
+                .map(|bytes| format!(" ({})", size_text(bytes)))
+                .unwrap_or_default()
+        ));
+    }
+}
+
+fn run_disk(cwd: &Path, args: Vec<String>) -> Result<ExitCode, String> {
+    if args.first().map(String::as_str) == Some("grow") {
+        if !grow_enabled() {
+            return Err("disk grow is not available in this release yet".to_owned());
+        }
+        let size = args.get(1).ok_or("disk grow needs a size in GiB")?;
+        let target = args
+            .get(2)
+            .map_or_else(|| cwd.to_path_buf(), |path| cwd.join(path));
+        let status = disk_status(&target).map_err(|err| err.to_string())?;
+        // This process must not be what keeps the volume in use.
+        let _ = std::env::set_current_dir(std::env::temp_dir());
+        let size_gib: u64 = size
+            .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+            .parse()
+            .map_err(|_| format!("bad size: {size}"))?;
+        let plan = plan_grow(&status, size_gib).map_err(|err| err.to_string())?;
+        println!(
+            "Growing {} from {:.0} GiB to {} GiB ({}).",
+            plan.root,
+            gib(plan.current_bytes),
+            plan.size_gib,
+            plan.file.display()
+        );
+        println!(
+            "Windows will ask for administrator approval. {} goes offline for a few seconds,\nso nothing may have a file or folder open on it.",
+            plan.root
+        );
+        grow(&plan).map_err(|err| err.to_string())?;
+        let after = disk_status(&target).map_err(|err| err.to_string())?;
+        println!(
+            "{} is now {:.0} GiB, {:.0} GiB free.",
+            after.volume.root,
+            gib(after.volume.total),
+            gib(after.volume.free)
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args.iter().any(|arg| arg == "--delete-original") {
+        let force = args.iter().any(|arg| arg == "--force");
+        if let Some(other) = args
+            .iter()
+            .find(|arg| !matches!(arg.as_str(), "--delete-original" | "--force"))
+        {
+            return Err(format!("unknown option {other}"));
+        }
+        let kept = kept_originals(cwd);
+        if kept.is_empty() {
+            println!("No original kept by a move of this project is left.");
+            return Ok(ExitCode::SUCCESS);
+        }
+        let mut failed = false;
+        for kept in &kept {
+            match delete_original(cwd, &kept.path, force) {
+                Ok(()) => println!("Deleted {}.", kept.path.display()),
+                Err(message) => {
+                    eprintln!("{message}");
+                    failed = true;
+                }
+            }
+        }
+        return Ok(if failed {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        });
+    }
+    let status = disk_status(cwd).map_err(|err| err.to_string())?;
+    let kept = kept_originals(cwd);
+    if args.iter().any(|arg| arg == "--json") {
+        let image = status.image.as_ref().map(|image| {
+            serde_json::json!({
+                "file": image.file.display().to_string(),
+                "file_bytes": image.file_bytes,
+                "host": image.host.as_ref().map(volume_json),
+            })
+        });
+        let kept: Vec<_> = kept
+            .iter()
+            .map(|kept| {
+                serde_json::json!({
+                    "path": kept.path.display().to_string(),
+                    "moved_from": kept.moved_from.display().to_string(),
+                    "moved_at": kept.moved_at,
+                    "bytes": kept.bytes,
+                })
+            })
+            .collect();
+        let value = serde_json::json!({
+            "volume": volume_json(&status.volume),
+            "image": image,
+            "room": status.room(),
+            "can_grow": status.can_grow() && grow_enabled(),
+            "kept": kept,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(other) = args.first() {
+        return Err(format!("unknown option {other}"));
+    }
+    let volume = &status.volume;
+    println!(
+        "{}  {}  {:.1} GiB free of {:.1} GiB",
+        volume.root,
+        volume.filesystem,
+        gib(volume.free),
+        gib(volume.total)
+    );
+    if let Some(image) = &status.image {
+        println!(
+            "  lives in {}, which takes {:.1} GiB now",
+            image.file.display(),
+            gib(image.file_bytes)
+        );
+        if let Some(host) = &image.host {
+            println!(
+                "  {} has {:.1} GiB free of {:.1} GiB",
+                host.root,
+                gib(host.free),
+                gib(host.total)
+            );
+        }
+        if status.limited_by_host() {
+            println!(
+                "  only {:.1} GiB can really be written: the file grows into its host's free space",
+                gib(status.room())
+            );
+        }
+    }
+    for kept in &kept {
+        println!(
+            "  original kept by a move: {}{}",
+            kept.path.display(),
+            kept.bytes
+                .map(|bytes| format!(" ({})", size_text(bytes)))
+                .unwrap_or_default()
+        );
+        match check_kept(cwd, &kept.path) {
+            Ok(check) if check.is_clear() => println!(
+                "    everything in it is in the project; `git multibox disk --delete-original` deletes it"
+            ),
+            Ok(check) => {
+                for name in &check.missing {
+                    println!("    not in the project: commit of {name}");
+                }
+                for name in &check.differing {
+                    println!("    changed since the move: {name}");
+                }
+            }
+            Err(err) => println!("    cannot compare it with the project: {err}"),
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn parse_add(args: Vec<String>) -> Result<(AddOptions, bool), String> {
     const WITH_VALUE: [&str; 4] = ["-b", "-B", "--reason", "--orphan"];
     let mut options = AddOptions {
@@ -210,6 +463,7 @@ fn run_add(cwd: &Path, args: Vec<String>) -> Result<ExitCode, String> {
     for warning in &outcome.warnings {
         terminal.warn(warning);
     }
+    remind_of_originals(cwd, &terminal);
     let summary = outcome.summary;
     let method = if outcome.native {
         "git"
@@ -639,12 +893,13 @@ fn run_init(cwd: &Path, args: Vec<String>) -> Result<ExitCode, String> {
             destination,
             kept_at,
             updated,
+            kept_bytes,
         } => {
             println!(
-                "Done: the project now lives in {} and the old path still works ({updated} late changes brought across).\nThe original is kept at {}; delete it yourself once you are happy.",
+                "Done: the project now lives in {} and the old path still works ({updated} late changes brought across).",
                 destination.display(),
-                kept_at.display()
             );
+            offer_to_delete_original(&project, &kept_at, kept_bytes);
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -667,10 +922,8 @@ fn run_migrate(cwd: &Path, args: Vec<String>) -> Result<ExitCode, String> {
     let destination = cwd.join(destination.ok_or("migrate needs a <destination>")?);
     if do_switch {
         let outcome = switch(cwd, &destination, &exclude).map_err(|err| err.to_string())?;
-        println!(
-            "Switched. The original is kept at {}; delete it yourself once you are happy.",
-            outcome.kept_at.display()
-        );
+        println!("Switched.");
+        offer_to_delete_original(cwd, &outcome.kept_at, outcome.kept_bytes);
         return Ok(ExitCode::SUCCESS);
     }
     let outcome = migrate(
@@ -772,8 +1025,8 @@ fn real_directory(cwd: PathBuf) -> PathBuf {
 }
 
 /// Commands this program implements itself; git answers `-h` for the rest.
-const OWN_COMMANDS: [&str; 10] = [
-    "add", "remove", "finish", "doctor", "env", "setup", "init", "migrate", "ui", "update",
+const OWN_COMMANDS: [&str; 11] = [
+    "add", "remove", "finish", "doctor", "disk", "env", "setup", "init", "migrate", "ui", "update",
 ];
 
 /// `-h` or `--help` among a command's own options, before any `--`.
@@ -803,6 +1056,7 @@ fn run() -> Result<ExitCode, String> {
         "remove" => run_remove(&cwd, args),
         "finish" => run_finish(&cwd, args),
         "doctor" => run_doctor(&cwd, &args),
+        "disk" => run_disk(&cwd, args),
         "env" => run_env(&cwd, &args),
         "setup" => run_setup_command(args),
         "init" => run_init(&cwd, args),

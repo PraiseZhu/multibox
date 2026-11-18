@@ -10,6 +10,8 @@ use std::path::Path;
 pub struct SyncReport {
     pub updated: u64,
     pub removed: u64,
+    /// What the selected files of the source add up to.
+    pub bytes: u64,
     pub failures: Vec<Failure>,
 }
 
@@ -67,6 +69,7 @@ pub fn sync(
 
     let mut report = SyncReport {
         updated: changed.len() as u64,
+        bytes: source.bytes,
         ..SyncReport::default()
     };
     for file in &changed {

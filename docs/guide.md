@@ -38,7 +38,13 @@ it starts small, it fills towards that size with use and never shrinks.
 The copy happens while you keep working. When it is done, close the editor and
 run `git multibox init --project <path>` from outside the project folder. It
 brings across what changed and redirects the old path to the new location. The
-original stays on disk until you delete it. Run `init` as many times as you
+original stays on disk, renamed to `<name>.multibox-original`: it is the way
+back if the project does not work from its new place. When `init` finishes in
+a terminal it asks whether to delete it now, keeping it unless you answer yes;
+run from a script, it only says how. Later, `git multibox add` and `doctor`
+remind you while it is there, the window lists it, and
+`git multibox disk --delete-original` deletes it. Each first compares it with
+the project and keeps it if it holds commits or changes the project lacks. Run `init` as many times as you
 like: it does whatever is left. On macOS it has nothing to do.
 
 A worktree only shares data with its source on the same volume. Created on
@@ -88,6 +94,8 @@ git multibox remove [-f] <worktree>
 git multibox finish [--keep-branch] <worktree> [-- <merge options>]
 git multibox init [--project <path>] [--to <path>] [--exclude <path>]...
 git multibox doctor
+git multibox disk [--json]
+git multibox disk --delete-original [--force]
 git multibox env
 git multibox ui [<path>]
 ```
@@ -100,6 +108,16 @@ switches a project.
 
 `git multibox -h`, or `-h` after any command, prints the full usage.
 `git multibox --help` does not: git takes it as a request for a manual page.
+
+`disk` shows the volume the repository is on. For a Dev Drive in a virtual
+disk file it also shows the file, what it takes now, and the free space of the
+volume holding it: the file grows as the drive is written and never shrinks,
+so that volume can fill up before the drive does, and what can really be
+written is the smaller of the two. `disk --delete-original` deletes the
+original a move kept, after the same comparison as above; `--force` deletes it
+even when it holds something the project lacks. Nothing here shrinks a volume:
+Windows cannot shrink ReFS, and a smaller maximum would free nothing on the
+host disk.
 
 `git multibox update` installs the latest stable GitHub release of both programs
 in the directory containing the running command. It works outside repositories,

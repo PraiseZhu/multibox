@@ -26,7 +26,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
     FILE_WRITE_ATTRIBUTES, FileBasicInfo, FileEndOfFileInfo, FileStandardInfo, GetDiskFreeSpaceExW,
     GetDiskFreeSpaceW, GetDriveTypeW, GetFileInformationByHandleEx, GetLogicalDrives,
-    GetVolumeInformationW, GetVolumePathNameW, OPEN_EXISTING, SetFileInformationByHandle,
+    GetVolumeInformationW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+    GetVolumePathNamesForVolumeNameW, OPEN_EXISTING, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
@@ -227,29 +228,181 @@ pub fn os_build() -> Option<(u32, u32)> {
 /// Every lettered volume on the machine. Removable or unready drives are listed
 /// only if they answer.
 pub fn volumes() -> Vec<Volume> {
-    const DRIVE_FIXED: u32 = 3;
     let mask = unsafe { GetLogicalDrives() };
     (0..26u8)
         .filter(|bit| mask & (1 << bit) != 0)
         .filter_map(|bit| {
             let root = format!("{}:\\", (b'A' + bit) as char);
             let wide_root: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
-            let info = volume_info(&wide_root).ok()?;
-            let (mut free, mut total) = (0u64, 0u64);
-            check(unsafe {
-                GetDiskFreeSpaceExW(wide_root.as_ptr(), &mut free, &mut total, null_mut())
-            })
-            .ok()?;
-            Some(Volume {
-                root,
-                filesystem: info.filesystem,
-                reflink: info.flags & FILE_SUPPORTS_BLOCK_REFCOUNTING != 0,
-                free,
-                total,
-                fixed: unsafe { GetDriveTypeW(wide_root.as_ptr()) } == DRIVE_FIXED,
-            })
+            volume_from_root(&wide_root).ok()
         })
         .collect()
+}
+
+fn volume_from_root(root: &[u16]) -> io::Result<Volume> {
+    const DRIVE_FIXED: u32 = 3;
+    let info = volume_info(root)?;
+    let (mut free, mut total) = (0u64, 0u64);
+    check(unsafe { GetDiskFreeSpaceExW(root.as_ptr(), &mut free, &mut total, null_mut()) })?;
+    let end = root
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(root.len());
+    Ok(Volume {
+        root: String::from_utf16_lossy(&root[..end]),
+        filesystem: info.filesystem,
+        reflink: info.flags & FILE_SUPPORTS_BLOCK_REFCOUNTING != 0,
+        free,
+        total,
+        fixed: unsafe { GetDriveTypeW(root.as_ptr()) } == DRIVE_FIXED,
+    })
+}
+
+/// The volume holding `path`, also when it is mounted in a folder rather than
+/// at a drive letter.
+pub fn volume_at(path: &Path) -> io::Result<Volume> {
+    volume_from_root(&volume_root(path)?)
+}
+
+/// The `\\?\Volume{…}\` name of the volume mounted at `root`.
+fn volume_name(root: &[u16]) -> io::Result<Vec<u16>> {
+    let mut name = vec![0u16; 64];
+    check(unsafe {
+        GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), name.len() as u32)
+    })?;
+    Ok(name)
+}
+
+/// Where a volume named `\\?\Volume{…}\` is mounted: a drive letter if it has
+/// one, else its first folder, else the name itself.
+fn mount_point(name: &[u16]) -> String {
+    let mut paths = vec![0u16; 1024];
+    let mut needed = 0u32;
+    let found = unsafe {
+        GetVolumePathNamesForVolumeNameW(
+            name.as_ptr(),
+            paths.as_mut_ptr(),
+            paths.len() as u32,
+            &mut needed,
+        )
+    } != 0;
+    let first = found
+        .then(|| {
+            paths
+                .split(|unit| *unit == 0)
+                .find(|path| !path.is_empty())
+                .map(String::from_utf16_lossy)
+        })
+        .flatten();
+    first.unwrap_or_else(|| {
+        let end = name
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(name.len());
+        String::from_utf16_lossy(&name[..end])
+    })
+}
+
+/// The virtual disk file the volume holding `path` lives in, as with a Dev
+/// Drive `git multibox setup` made, or `None` for a volume on a real disk.
+/// Asks the volume itself, which needs no administrator rights.
+pub fn backing_image(path: &Path) -> io::Result<Option<PathBuf>> {
+    use windows_sys::Win32::Storage::Vhd::{
+        GET_STORAGE_DEPENDENCY_FLAG_HOST_VOLUMES, GetStorageDependencyInformation,
+        STORAGE_DEPENDENCY_INFO, STORAGE_DEPENDENCY_INFO_TYPE_2, STORAGE_DEPENDENCY_INFO_VERSION_2,
+    };
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+
+    let name = volume_name(&volume_root(path)?)?;
+    // A volume opens without the name's trailing backslash, and asking
+    // about it needs no access to its data.
+    let end = name
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(name.len());
+    let mut device: Vec<u16> = name[..end].to_vec();
+    if device.last() == Some(&u16::from(b'\\')) {
+        device.pop();
+    }
+    device.push(0);
+    let raw = unsafe {
+        CreateFileW(
+            device.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null(),
+            OPEN_EXISTING,
+            0,
+            null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let volume = Handle(raw);
+
+    // Entries point into the same buffer, after the fixed part; u64s keep it
+    // aligned for them.
+    let mut buffer = vec![0u64; 512];
+    loop {
+        let info = buffer.as_mut_ptr().cast::<STORAGE_DEPENDENCY_INFO>();
+        unsafe { (*info).Version = STORAGE_DEPENDENCY_INFO_VERSION_2 };
+        let mut used = 0u32;
+        let status = unsafe {
+            GetStorageDependencyInformation(
+                volume.0,
+                GET_STORAGE_DEPENDENCY_FLAG_HOST_VOLUMES,
+                (buffer.len() * 8) as u32,
+                info,
+                &mut used,
+            )
+        };
+        if status == ERROR_INSUFFICIENT_BUFFER && (used as usize) > buffer.len() * 8 {
+            buffer = vec![0u64; (used as usize).div_ceil(8)];
+            continue;
+        }
+        if status != 0 {
+            // A volume on a real disk depends on no file: Windows answers
+            // that with an error rather than an empty list.
+            return Ok(None);
+        }
+        let count = unsafe { (*info).NumberEntries } as usize;
+        let entries: *const STORAGE_DEPENDENCY_INFO_TYPE_2 =
+            unsafe { (*info).Anonymous.Version2Entries.as_ptr() };
+        let text = |pointer: *mut u16| -> Option<Vec<u16>> {
+            if pointer.is_null() {
+                return None;
+            }
+            let mut length = 0;
+            while unsafe { *pointer.add(length) } != 0 {
+                length += 1;
+            }
+            Some(unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec())
+        };
+        // The file nearest the volume; a differencing disk has its parents
+        // further up.
+        let nearest = (0..count)
+            .map(|index| unsafe { &*entries.add(index) })
+            .min_by_key(|entry| entry.AncestorLevel);
+        let Some(entry) = nearest else {
+            return Ok(None);
+        };
+        let (Some(mut host), Some(relative)) = (
+            text(entry.HostVolumeName),
+            text(entry.DependentVolumeRelativePath),
+        ) else {
+            return Ok(None);
+        };
+        // Named without the trailing backslash the lookup of its mount
+        // points needs.
+        if host.last() != Some(&u16::from(b'\\')) {
+            host.push(u16::from(b'\\'));
+        }
+        host.push(0);
+        let mut file = PathBuf::from(mount_point(&host));
+        file.push(String::from_utf16_lossy(&relative).trim_start_matches('\\'));
+        return Ok(Some(file));
+    }
 }
 
 /// Bytes available to the caller on the volume holding `path`.

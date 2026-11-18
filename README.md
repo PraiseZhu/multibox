@@ -89,6 +89,7 @@ git multibox finish ../feature           # 合并回当前分支，再删掉工�
 git multibox remove ../feature           # 或者直接丢弃
 git multibox ui                          # 打开工作区管理器
 git multibox doctor                      # 这台机器和这个仓库能用上什么
+git multibox disk                        # 工程所在的卷、Dev Drive 的虚拟盘文件和迁移留下的原工程
 ```
 
 **Windows 上建议用 Dev Drive。** NTFS 上工作区里的文件大多要复制，只有只写一次的缓存用硬链接共享；Dev Drive 和 macOS 上，文件在被修改之前都是共享的，建一个工作区只要几秒，几乎不占空间。`git multibox init` 会创建 Dev Drive 并把工程搬过去，只需做一次，搬的时候不耽误干活。

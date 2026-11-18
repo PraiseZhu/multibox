@@ -232,6 +232,66 @@ pub fn clean_merged(main: &Path, path: &Path, branch: Option<&str>) -> Result<St
     Ok(message)
 }
 
+/// What a kept original holds that the project lacks, in a sentence; `None`
+/// when it holds nothing.
+pub fn kept_problems(check: &multibox_core::KeptCheck) -> Option<String> {
+    let mut parts = Vec::new();
+    if !check.missing.is_empty() {
+        parts.push(format!("{} 个分支或标签指向的提交", check.missing.len()));
+    }
+    if !check.differing.is_empty() {
+        parts.push(format!("{} 个改过的文件", check.differing.len()));
+    }
+    (!parts.is_empty()).then(|| format!("{}不在现在的工程里", parts.join("和")))
+}
+
+/// Deletes an original that moving the project left behind. Unless `force`,
+/// it is compared with the project first, and kept if it holds anything the
+/// project lacks.
+pub fn delete_kept(main: &Path, kept: &Path, force: bool) -> Result<String, String> {
+    if !force {
+        let check = multibox_core::check_kept(main, kept).map_err(|err| err.to_string())?;
+        if let Some(problems) = kept_problems(&check) {
+            return Err(format!("{problems}，没有删除"));
+        }
+    }
+    let report = multibox_core::delete_kept(main, kept).map_err(|err| err.to_string())?;
+    let failures = report.failures.into_iter().take(3).collect();
+    Ok(with_failures(
+        format!("已删除 {}", kept.display()),
+        failures,
+    ))
+}
+
+/// Raises the maximum size of the Dev Drive the project is on. Windows asks
+/// for administrator approval, and refuses while anything has a file open on
+/// the volume.
+pub fn grow(main: &Path, size_gib: u64) -> Result<String, String> {
+    // This window must not be what keeps the volume in use.
+    let _ = std::env::set_current_dir(std::env::temp_dir());
+    let status = multibox_core::disk_status(main).map_err(|err| err.to_string())?;
+    let plan = multibox_core::plan_grow(&status, size_gib).map_err(|err| err.to_string())?;
+    let root = plan.root.trim_end_matches(['\\', '/']).to_owned();
+    multibox_core::grow(&plan).map_err(|err| {
+        let message = err.to_string();
+        if message.contains(" is in use") {
+            format!(
+                "{root} 上还有程序开着文件或文件夹，Windows 不让卸下它。关掉编辑器、IDE、终端和 Cindy 会话后再试。什么都没改。"
+            )
+        } else if message.contains("declined") {
+            "没有同意管理员权限，什么都没改。".to_owned()
+        } else {
+            message
+        }
+    })?;
+    let after = multibox_core::disk_status(main).map_err(|err| err.to_string())?;
+    Ok(format!(
+        "{root} 已扩容到 {}，剩 {}",
+        crate::format::bytes(after.volume.total),
+        crate::format::bytes(after.volume.free)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     //! Every button's work, against real repositories in temporary directories.

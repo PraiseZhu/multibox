@@ -218,6 +218,8 @@ pub struct SwitchOutcome {
     pub kept_at: PathBuf,
     /// Files that changed after the copy was made and were brought across.
     pub updated: u64,
+    /// What the original holds, as far as the copy took it.
+    pub kept_bytes: u64,
 }
 
 /// Brings a migrated copy up to date, then points the old project path at it, so
@@ -248,9 +250,11 @@ pub fn switch(cwd: &Path, destination: &Path, exclude: &[String]) -> Result<Swit
         .ok_or_else(|| Error::new("cannot switch a filesystem root"))?
         .to_string_lossy()
         .into_owned();
-    let kept_at = repo
-        .worktree
-        .with_file_name(format!("{name}.multibox-original"));
+    let kept_at = crate::disk::native(
+        &repo
+            .worktree
+            .with_file_name(format!("{name}{}", crate::disk::KEPT_SUFFIX)),
+    );
     if kept_at.exists() {
         return Err(Error::new(format!("{} already exists", kept_at.display())));
     }
@@ -291,6 +295,19 @@ pub fn switch(cwd: &Path, destination: &Path, exclude: &[String]) -> Result<Swit
         fs::rename(&kept_at, &repo.worktree)?;
         return Err(err);
     }
+    // So the window can show the original and offer to delete it. Losing the
+    // note loses nothing but that.
+    let _ = crate::disk::remember_kept(
+        &destination.join(".git"),
+        crate::disk::KeptOriginal {
+            path: kept_at.clone(),
+            moved_from: repo.worktree.clone(),
+            moved_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs()),
+            bytes: Some(synced.bytes),
+        },
+    );
 
     let mut args = vec!["worktree".to_owned(), "repair".to_owned()];
     args.extend(linked.iter().map(|path| path.display().to_string()));
@@ -298,6 +315,7 @@ pub fn switch(cwd: &Path, destination: &Path, exclude: &[String]) -> Result<Swit
     Ok(SwitchOutcome {
         kept_at,
         updated: synced.updated + synced.removed,
+        kept_bytes: synced.bytes,
     })
 }
 
@@ -382,6 +400,7 @@ pub enum InitOutcome {
         destination: PathBuf,
         kept_at: PathBuf,
         updated: u64,
+        kept_bytes: u64,
     },
 }
 
@@ -508,6 +527,7 @@ pub fn init(cwd: &Path, options: &InitOptions, observer: &dyn Observer) -> Resul
         destination,
         kept_at: switched.kept_at,
         updated: switched.updated,
+        kept_bytes: switched.kept_bytes,
     })
 }
 

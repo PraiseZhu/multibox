@@ -26,6 +26,8 @@ use gpui_kit::{
     SharedString, Stateful, StatefulInteractiveElement, Styled, Window, WindowControlArea, div,
     hsla, pattern_slash, point, prelude::FluentBuilder, px, relative, rgb,
 };
+use multibox_core::DiskStatus;
+use std::path::Path;
 use std::sync::atomic::Ordering;
 
 /// Below this, the git share of a worktree is its one-line `.git` file.
@@ -691,7 +693,7 @@ impl MultiboxApp {
             .children(
                 self.snapshot
                     .as_ref()
-                    .and_then(|snapshot| self.disk_chip(snapshot, palette))
+                    .and_then(|snapshot| self.disk_chip(snapshot, palette, cx))
                     .map(|chip| div().flex_none().occlude().child(chip)),
             )
             .child(
@@ -987,21 +989,48 @@ impl MultiboxApp {
         )
     }
 
-    /// The volume the repository is on, small, in the top bar.
-    fn disk_chip(&self, snapshot: &Snapshot, palette: &Palette) -> Option<AnyElement> {
-        let volume = snapshot.volume_of(&snapshot.main)?;
+    /// The volume the repository is on, small, in the top bar: what can
+    /// still be written there. A click opens the disk in the inspector.
+    fn disk_chip(
+        &self,
+        snapshot: &Snapshot,
+        palette: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let status = snapshot.disk.as_ref();
+        let volume = status
+            .map(|status| &status.volume)
+            .or_else(|| snapshot.volume_of(&snapshot.main))?;
         let details = self.details.get(&snapshot.main);
         let reflink = details.is_some_and(|details| details.reflink);
         let filesystem = details
             .and_then(|details| details.filesystem.clone())
             .unwrap_or_else(|| volume.filesystem.clone());
+        let room = status.map_or(volume.free, |status| status.room());
+        let limited = status.is_some_and(|status| status.limited_by_host());
         let used = volume.total.saturating_sub(volume.free);
-        let full = used as f64 > volume.total as f64 * 0.9;
+        let full = used as f64 > volume.total as f64 * 0.9 || room < volume.total / 10;
         let mode = if reflink {
             "支持 reflink：新工作区和源工作区共用没改过的数据，几乎不占空间。"
         } else {
             "新工作区是完整的一份，只有写一次就不再改的缓存通过硬链接共用。放到 Dev Drive 上可以共用全部数据。"
         };
+        let host = status
+            .and_then(|status| status.image.as_ref())
+            .and_then(|image| image.host.as_ref())
+            .map(|host| host.root.trim_end_matches(['\\', '/']).to_owned());
+        let mut tooltip = format!(
+            "已用 {}，共 {}。{mode}",
+            format::percent(used, volume.total),
+            format::bytes(volume.total)
+        );
+        if limited && let Some(host) = &host {
+            tooltip += &format!(
+                "\n它是 {host} 上的一个虚拟盘文件，写入会让文件变大，所以能写入的空间受 {host} 剩余空间限制。"
+            );
+        }
+        tooltip += "\n点开看磁盘详情。";
+        let open = self.disk_open;
         Some(
             h_flex()
                 .id("disk")
@@ -1010,23 +1039,38 @@ impl MultiboxApp {
                 .px(px(8.))
                 .gap(px(6.))
                 .rounded(px(6.))
+                .cursor_pointer()
                 .bg(palette.selected)
+                .when(open, |chip| chip.border_1().border_color(palette.ink3))
+                .hover(|style| style.bg(palette.hover))
                 .child(glyph(
                     IconName::HardDrive,
                     13.,
-                    if full { palette.danger } else { palette.ink3 },
+                    if full {
+                        palette.danger
+                    } else if limited {
+                        palette.warning
+                    } else {
+                        palette.ink3
+                    },
                 ))
                 .child(text(12., palette.ink2).child(format!(
                     "{} {} · 剩 {}",
                     volume.root.trim_end_matches(['\\', '/']),
                     filesystem,
-                    format::bytes(volume.free)
+                    format::bytes(room)
                 )))
-                .tooltip(tip(format!(
-                    "已用 {}，共 {}。{mode}",
-                    format::percent(used, volume.total),
-                    format::bytes(volume.total)
-                )))
+                .child(glyph(
+                    if open {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    },
+                    12.,
+                    palette.ink3,
+                ))
+                .tooltip(tip(tooltip))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_disk(cx)))
                 .into_any_element(),
         )
     }
@@ -1056,6 +1100,9 @@ impl MultiboxApp {
         }
         if cleanup.stale > 0 {
             what.push(format!("{} 条失效记录", cleanup.stale));
+        }
+        if !cleanup.kept.is_empty() {
+            what.push(format!("{} 个迁移留下的原工程", cleanup.kept.len()));
         }
         tile(
             IconName::BrushCleaning,
@@ -1245,6 +1292,7 @@ impl MultiboxApp {
             })
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.selected = Some(select.clone());
+                this.disk_open = false;
                 cx.notify();
             }))
             .child(identity)
@@ -1513,6 +1561,11 @@ impl MultiboxApp {
         palette: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.disk_open
+            && let Some(status) = &snapshot.disk
+        {
+            return self.disk_panel(snapshot, status, palette, cx);
+        }
         let Some(worktree) = self
             .selected
             .as_ref()
@@ -1922,6 +1975,373 @@ impl MultiboxApp {
 
         div()
             .id("inspector")
+            .size_full()
+            .overflow_y_scrollbar()
+            .child(body)
+            .into_any_element()
+    }
+
+    /// The volume the repository is on: how full it is, what holds it, how
+    /// to grow it, and what a move left behind on the old disk.
+    fn disk_panel(
+        &self,
+        snapshot: &Snapshot,
+        status: &DiskStatus,
+        palette: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let volume = &status.volume;
+        let name = |root: &str| root.trim_end_matches(['\\', '/']).to_owned();
+        let root = name(&volume.root);
+        let reflink = self
+            .details
+            .get(&snapshot.main)
+            .is_some_and(|details| details.reflink);
+        let used = volume.total.saturating_sub(volume.free);
+        let host = status.image.as_ref().and_then(|image| image.host.as_ref());
+
+        let value_row = |label: String, value: String, color: Hsla| {
+            h_flex()
+                .gap(px(8.))
+                .child(text(13., palette.ink2).flex_1().min_w_0().child(label))
+                .child(
+                    text(13., color)
+                        .flex_none()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(value),
+                )
+        };
+        let note = |words: String, color: Hsla| text(12., color).line_height(px(18.)).child(words);
+        // How full a volume is: one solid stretch for what is used.
+        let gauge = |id: &'static str, used: u64, total: u64, color: Hsla| {
+            let share = if total == 0 {
+                0.
+            } else {
+                (used as f32 / total as f32).clamp(0., 1.)
+            };
+            div()
+                .id(id)
+                .h(px(8.))
+                .w_full()
+                .rounded(px(4.))
+                .bg(palette.selected)
+                .child(div().h_full().rounded(px(4.)).w(relative(share)).bg(color))
+                .tooltip(tip(format!(
+                    "已用 {}，{}",
+                    format::bytes(used),
+                    format::percent(used, total)
+                )))
+        };
+        let mut kind = vec![volume.filesystem.clone()];
+        if status.image.is_some() && volume.filesystem.eq_ignore_ascii_case("ReFS") {
+            kind.push("Dev Drive".to_owned());
+        }
+        if status.image.is_some() {
+            kind.push("虚拟盘".to_owned());
+        }
+        if reflink {
+            kind.push("支持 reflink".to_owned());
+        }
+
+        let mut body = v_flex().p(px(24.)).gap(px(26.)).child(
+            v_flex()
+                .gap(px(8.))
+                .child(
+                    h_flex()
+                        .gap(px(10.))
+                        .child(glyph(IconName::HardDrive, 18., palette.ink3))
+                        .child(
+                            text(18., palette.ink)
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("磁盘 {root}")),
+                        )
+                        .child(
+                            Button::new("disk-close")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::Close)
+                                .accessibility_label("回到工作区")
+                                .tooltip("回到工作区")
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_disk(cx))),
+                        ),
+                )
+                .child(text(12., palette.ink3).child(kind.join(" · "))),
+        );
+
+        // What can still be written.
+        let mut space = v_flex()
+            .gap(px(10.))
+            .child(caption("能写入", palette))
+            .child(figure(status.room(), 26., 14., palette))
+            .child(gauge("disk-used", used, volume.total, palette.cache))
+            .child(
+                v_flex()
+                    .pt(px(2.))
+                    .gap(px(7.))
+                    .child(value_row(
+                        "已用".to_owned(),
+                        format::bytes(used),
+                        palette.ink,
+                    ))
+                    .child(value_row(
+                        "剩余".to_owned(),
+                        format::bytes(volume.free),
+                        palette.ink,
+                    ))
+                    .child(value_row(
+                        "容量".to_owned(),
+                        format::bytes(volume.total),
+                        palette.ink2,
+                    )),
+            );
+        if status.limited_by_host()
+            && let Some(host) = host
+        {
+            let host = name(&host.root);
+            space = space.child(
+                h_flex()
+                    .items_start()
+                    .gap(px(8.))
+                    .child(div().pt(px(2.)).child(glyph(
+                        IconName::TriangleAlert,
+                        13.,
+                        palette.warning,
+                    )))
+                    .child(note(
+                        format!(
+                            "{host} 只剩 {}，比 {root} 报的剩余少：写入会让虚拟盘文件变大，{root} 写满之前 {host} 会先满。",
+                            format::bytes(status.room())
+                        ),
+                        palette.ink2,
+                    )),
+            );
+        }
+        body = body.child(space);
+
+        // The file the volume lives in, and the disk under it.
+        if let Some(image) = &status.image {
+            let file = image.file.clone();
+            let folder = image.file.parent().map(Path::to_path_buf);
+            let mut section = v_flex()
+                .gap(px(10.))
+                .child(caption("虚拟盘文件", palette))
+                .child(
+                    h_flex()
+                        .items_start()
+                        .gap(px(6.))
+                        .child(
+                            text(12., palette.ink3)
+                                .flex_1()
+                                .min_w_0()
+                                .font_family(palette.mono.clone())
+                                .child(file.display().to_string()),
+                        )
+                        .children(folder.map(|folder| {
+                            Button::new("disk-file-open")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::FolderOpen)
+                                .accessibility_label("在文件管理器里打开")
+                                .tooltip("在文件管理器里打开")
+                                .on_click(move |_, _, cx| cx.open_with_system(&folder))
+                        })),
+                )
+                .child(value_row(
+                    "现在占用".to_owned(),
+                    format::bytes(image.file_bytes),
+                    palette.ink,
+                ));
+            if let Some(host) = host {
+                let host_used = host.total.saturating_sub(host.free);
+                section = section
+                    .child(div().h(px(1.)).bg(palette.hairline))
+                    .child(value_row(
+                        format!("{} 剩余", name(&host.root)),
+                        format!(
+                            "{} / {}",
+                            format::bytes(host.free),
+                            format::bytes(host.total)
+                        ),
+                        palette.ink,
+                    ))
+                    .child(gauge("disk-host", host_used, host.total, palette.git));
+            }
+            section = section.child(note(
+                format!(
+                    "文件随写入增长，最多长到 {root} 的容量；删掉 {root} 上的文件，它也不会变小。"
+                ),
+                palette.ink3,
+            ));
+            body = body.child(section);
+        }
+
+        // Growing, and why there is no shrinking.
+        let mut size = v_flex().gap(px(10.)).child(caption("调整大小", palette));
+        let no_shrinking = note(
+            format!(
+                "不能缩小：Windows 只能缩小 NTFS 分区，不能缩小 ReFS。虚拟盘本来就按需增长，调小上限也腾不出{}的空间；要腾空间，就清理工作区{}。",
+                host.map(|host| format!(" {} ", name(&host.root)))
+                    .unwrap_or_else(|| "磁盘上".to_owned()),
+                if snapshot.kept.is_empty() {
+                    ""
+                } else {
+                    "或下面迁移留下的原工程"
+                }
+            ),
+            palette.ink3,
+        );
+        if status.can_grow() && !multibox_core::grow_enabled() {
+            size = size
+                .child(note(
+                    format!("这一版还不能在这里调大 {root} 的上限。"),
+                    palette.ink3,
+                ))
+                .child(no_shrinking);
+        } else if status.can_grow() {
+            size = size
+                .child(
+                    h_flex().child(
+                        Button::new("disk-grow")
+                            .small()
+                            .outline()
+                            .icon(IconName::Maximize2)
+                            .label("扩容…")
+                            .tooltip("调大虚拟盘的上限")
+                            .loading(self.global_busy.as_deref() == Some("扩容"))
+                            .disabled(self.global_busy.is_some())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.open_grow_dialog(window, cx)
+                                }),
+                            ),
+                    ),
+                )
+                .child(note(
+                    format!(
+                        "扩容时 {root} 会卸下几秒，要先关掉在 {root} 上开着文件或文件夹的程序。"
+                    ),
+                    palette.ink3,
+                ))
+                .child(no_shrinking);
+        } else if cfg!(windows) && reflink {
+            size = size.child(note(
+                format!(
+                    "{root} 是磁盘上的分区，不在虚拟盘文件里。调整大小用 Windows 设置里的“磁盘和卷”。"
+                ),
+                palette.ink3,
+            ));
+        } else if cfg!(windows) {
+            size = size.child(note(
+                format!(
+                    "{root} 是普通的 {} 卷，大小由 Windows 磁盘管理调整，Multibox 不动它。在 NTFS 上新工作区要复制文件；运行 git multibox init 把工程搬到 Dev Drive，工作区之间就能共用数据。",
+                    volume.filesystem
+                ),
+                palette.ink3,
+            ));
+        } else {
+            size = size.child(note(
+                "这个卷和同一块磁盘上的其他卷共用剩余空间，不需要扩容。".to_owned(),
+                palette.ink3,
+            ));
+        }
+        body = body.child(size);
+
+        // What moving the project here left behind.
+        if !snapshot.kept.is_empty() {
+            let mut section = v_flex()
+                .gap(px(12.))
+                .child(caption("迁移留下的原工程", palette));
+            for (index, kept) in snapshot.kept.iter().enumerate() {
+                let facts = self.kept_facts.get(&kept.path);
+                let size = facts
+                    .and_then(|facts| facts.bytes)
+                    .map(format::bytes)
+                    .or_else(|| {
+                        kept.bytes
+                            .map(|bytes| format!("约 {}", format::bytes(bytes)))
+                    })
+                    .unwrap_or_else(|| "正在计算".to_owned());
+                let (icon, color, verdict) = match facts.and_then(|facts| facts.check.as_ref()) {
+                    None => (
+                        IconName::Clock,
+                        palette.ink3,
+                        "正在和现在的工程比较".to_owned(),
+                    ),
+                    Some(Ok(check)) => match crate::ops::kept_problems(check) {
+                        None => (
+                            IconName::CircleCheck,
+                            palette.success,
+                            "和现在的工程一致，删掉不会丢东西".to_owned(),
+                        ),
+                        Some(problems) => (IconName::TriangleAlert, palette.warning, problems),
+                    },
+                    Some(Err(err)) => (
+                        IconName::TriangleAlert,
+                        palette.danger,
+                        format!("没能比较：{err}"),
+                    ),
+                };
+                let path = kept.path.clone();
+                let busy = self.global_busy.as_deref() == Some("删除原工程");
+                section = section.child(
+                    v_flex()
+                        .gap(px(6.))
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .child(
+                                    glyph(IconName::FolderArchive, 13., palette.ink3).flex_none(),
+                                )
+                                .child(
+                                    text(12., palette.ink)
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(palette.mono.clone())
+                                        .child(kept.path.display().to_string()),
+                                )
+                                .child(
+                                    text(13., palette.ink2)
+                                        .flex_none()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(size),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .child(glyph(icon, 13., color).flex_none())
+                                .child(text(12., palette.ink3).flex_1().min_w_0().child(verdict))
+                                .child(
+                                    Button::new(("kept-delete", index))
+                                        .xsmall()
+                                        .outline()
+                                        .icon(IconName::Trash)
+                                        .label("删除")
+                                        .loading(busy)
+                                        .disabled(self.global_busy.is_some())
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.confirm_delete_kept(path.clone(), window, cx)
+                                        })),
+                                ),
+                        )
+                        .when(!kept.moved_from.as_os_str().is_empty(), |entry| {
+                            entry.child(text(12., palette.ink3).pl(px(21.)).child(format!(
+                                "{} 现在指向 {}",
+                                kept.moved_from.display(),
+                                snapshot.main.display()
+                            )))
+                        }),
+                );
+            }
+            body = body.child(section);
+        }
+
+        div()
+            .id("disk-panel")
             .size_full()
             .overflow_y_scrollbar()
             .child(body)

@@ -118,6 +118,7 @@ git multibox finish ../feature           # merge it back here, then remove the w
 git multibox remove ../feature           # or throw it away
 git multibox ui                          # open the window
 git multibox doctor                      # what this machine and repository allow
+git multibox disk                        # the volume, the Dev Drive's file and what a move left behind
 ```
 
 **On Windows, use a Dev Drive.** On NTFS a worktree is mostly a copy; only

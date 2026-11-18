@@ -7,7 +7,7 @@
 use multibox_clone::Volume;
 use multibox_core::git::{self, Repo};
 use multibox_core::index::Index;
-use multibox_core::{Config, adapter};
+use multibox_core::{Config, DiskStatus, KeptOriginal, adapter};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -45,6 +45,11 @@ pub struct Snapshot {
     pub volumes: Vec<Volume>,
     /// Directories a removal moved aside and has not finished deleting.
     pub trash: Vec<PathBuf>,
+    /// The volume the main worktree is on, and the virtual disk file it
+    /// lives in if it does.
+    pub disk: Option<DiskStatus>,
+    /// Originals that moving the project onto this volume left behind.
+    pub kept: Vec<KeptOriginal>,
 }
 
 impl Snapshot {
@@ -112,6 +117,8 @@ pub fn load(dir: &Path) -> Result<Snapshot, String> {
     Ok(Snapshot {
         trash: multibox_core::sweep_trash(&main),
         volumes: multibox_clone::volumes(),
+        disk: multibox_core::disk_status(&main).ok(),
+        kept: multibox_core::kept_originals(&main),
         main,
         into,
         worktrees,
